@@ -25,23 +25,32 @@ function node(wf: ReturnType<typeof buildMigrationWorkflow>, id: string): Workfl
   return n!;
 }
 
-test("5-node linear graph: trigger -> withdraw -> verify -> supply -> verify", () => {
+test("6-node linear graph: trigger -> withdraw -> verify -> approve -> supply -> verify", () => {
   const wf = buildMigrationWorkflow(aaveV3Plan);
-  assert.equal(wf.nodes.length, 5);
+  assert.equal(wf.nodes.length, 6);
   assert.deepEqual(
     wf.nodes.map((n) => n.id),
-    ["trigger-1", "withdraw-source", "verify-withdraw", "supply-target", "verify-supply"]
+    ["trigger-1", "withdraw-source", "verify-withdraw", "approve-aave", "supply-target", "verify-supply"]
   );
-  assert.equal(wf.edges.length, 4);
+  assert.equal(wf.edges.length, 5);
   assert.deepEqual(
     wf.edges.map((e) => [e.source, e.target]),
     [
       ["trigger-1", "withdraw-source"],
       ["withdraw-source", "verify-withdraw"],
-      ["verify-withdraw", "supply-target"],
+      ["verify-withdraw", "approve-aave"],
+      ["approve-aave", "supply-target"],
       ["supply-target", "verify-supply"],
     ]
   );
+});
+
+test("approve-aave node uses web3/approve-token with unlimited allowance to the Aave V3 Sepolia Pool", () => {
+  const wf = buildMigrationWorkflow(aaveV3Plan);
+  const approve = node(wf, "approve-aave");
+  assert.equal(approve.data.config.actionType, "web3/approve-token");
+  assert.equal(approve.data.config.spenderAddress, "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951");
+  assert.equal(approve.data.config.amount, "max");
 });
 
 test("throws for any non-aave-v3 pair -- morpho support was removed entirely", () => {

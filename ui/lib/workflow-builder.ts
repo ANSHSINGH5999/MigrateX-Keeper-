@@ -103,6 +103,9 @@ function edge(source: string, target: string, sourceHandle?: "true" | "false"): 
   return { id: `${source}-${target}${suffix}`, source, target, ...(sourceHandle ? { sourceHandle } : {}) };
 }
 
+/** Aave V3's Sepolia Pool -- `aave-v3/supply` calls `Pool.supply()`, which needs an ERC20 `transferFrom`, so the Pool needs an allowance on the source token first. */
+const AAVE_V3_SEPOLIA_POOL = "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951";
+
 /**
  * Builds an Aave V3-only migration workflow. Morpho and Aave V4 were both
  * ruled out by live, on-chain verification, not by their docs:
@@ -117,8 +120,19 @@ function edge(source: string, target: string, sourceHandle?: "true" | "false"): 
  * liquidity, 49/50 of its most recent transactions succeeding, and
  * KeeperHub's aave-v3 plugin accepting network 11155111 on a real call.
  *
- * 5-node linear graph (no threshold/condition gating, per spec):
- *   trigger-1 -> withdraw-source -> verify-withdraw -> supply-target -> verify-supply
+ * 6-node linear graph:
+ *   trigger-1 -> withdraw-source -> verify-withdraw -> approve-aave -> supply-target -> verify-supply
+ *
+ * approve-aave (web3/approve-token, amount "max") exists because
+ * aave-v3/supply's underlying Pool.supply() needs transferFrom, which
+ * reverts with an opaque "missing revert data" if the Pool doesn't already
+ * have an allowance -- confirmed live: a real execution's supply-target
+ * node failed exactly this way once a prior manual approval had been
+ * fully consumed. `web3/approve-token` cannot be direct-executed
+ * standalone (KeeperHub returns "Use workflow execution instead"), so it
+ * has to be a workflow node, not a one-off pre-flight call -- this makes
+ * every run of this workflow self-sufficient rather than depending on an
+ * approval done out of band.
  *
  * Source and target are the same Aave V3 Sepolia market (a same-market
  * round trip: withdraw then re-supply), since there is only one Aave V3
@@ -147,6 +161,13 @@ export function buildMigrationWorkflow(plan: MigrationPlan): KeeperHubWorkflow {
       address: plan.source_address,
       tokenConfig: tokenConfig(plan.network, plan.token),
     }),
+    actionNode("approve-aave", 500, {
+      actionType: "web3/approve-token",
+      network: plan.network,
+      tokenConfig: tokenConfig(plan.network, plan.token),
+      spenderAddress: AAVE_V3_SEPOLIA_POOL,
+      amount: "max",
+    }),
     actionNode("supply-target", 600, {
       actionType: "aave-v3/supply",
       network: plan.network,
@@ -169,7 +190,8 @@ export function buildMigrationWorkflow(plan: MigrationPlan): KeeperHubWorkflow {
   const edges: WorkflowEdge[] = [
     edge("trigger-1", "withdraw-source"),
     edge("withdraw-source", "verify-withdraw"),
-    edge("verify-withdraw", "supply-target"),
+    edge("verify-withdraw", "approve-aave"),
+    edge("approve-aave", "supply-target"),
     edge("supply-target", "verify-supply"),
   ];
 

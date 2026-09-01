@@ -82,7 +82,7 @@ confirmed `valid: true` via `validate_workflow(deepCheck: true)` — zero errors
 
 | Kind | Workflow ID | Nodes | What it does |
 |---|---|---|---|
-| `basic` | [`92r20hpg5rba6yp2s6j76`](https://app.keeperhub.com) | 5 | Manual trigger. Withdraw → verify → supply → verify, within Aave V3 Sepolia. **Executed live** — see [Verified execution](#verified-execution) below. |
+| `basic` | [`umty7wmwpsak9cztndvt3`](https://app.keeperhub.com) | 6 | Manual trigger. Withdraw → verify → approve → supply → verify, within Aave V3 Sepolia. **Executed live** — see [Verified execution](#verified-execution) below. |
 | `scheduled` | `6mfi90pptg2qtv5crmmf1` | 6 | Every 6h (`0 */6 * * *`), reads the live Aave V3 supply APY (`aave-v3/get-user-reserve-data.liquidityRate`, in ray units); if it's below 3%, withdraws and re-supplies 0.005 WETH, then logs the final balance either way. |
 | `guardian` | `awiys098yh7v2b9i5f8m1` | 5 | Hourly poll of the aWETH balance; if it drops below 0.004 (possible liquidation or an out-of-band withdrawal), runs a full Aave V3 health check and verifies the remaining gas balance. |
 | `advanced` | `ma6epf75fjdsonscq8roc` | 11 | Flagship. Pre-flight position check → balance gate → withdraw → receipt gate → supply → final verify, with dedicated `abort-log` and `alert-hold` off-ramps if either verification gate fails. |
@@ -107,9 +107,16 @@ actually moves a specific user's specific position rather than monitoring a fixe
 trigger-1 (manual)
   -> withdraw-source   (aave-v3/withdraw)
     -> verify-withdraw (web3/check-token-balance)
-      -> supply-target (aave-v3/supply)
-        -> verify-supply (web3/check-token-balance)
+      -> approve-aave   (web3/approve-token, amount "max")
+        -> supply-target (aave-v3/supply)
+          -> verify-supply (web3/check-token-balance)
 ```
+
+`approve-aave` exists because `aave-v3/supply` calls `Pool.supply()`, which needs an ERC20
+`transferFrom` — without a standing allowance to the Pool it reverts with an opaque `Error(32)`
+/ "missing revert data". `web3/approve-token` can't be direct-executed as a one-off call
+(KeeperHub returns "Use workflow execution instead"), so it has to live inside the workflow
+itself — making every run self-sufficient instead of depending on an approval done out of band.
 
 ### `advanced` workflow graph (the flagship)
 
@@ -129,12 +136,24 @@ trigger-1 (manual)
 
 ## Verified execution
 
-Real Sepolia testnet run of the `basic` workflow, independently confirmed via a direct
-`eth_getTransactionReceipt` call — not just KeeperHub's own "success" response:
+Real Sepolia testnet run of the current 6-node `basic` workflow (with the `approve-aave` gate),
+independently confirmed via direct `eth_getTransactionReceipt` calls for all three write
+transactions — not just KeeperHub's own "success" response:
 
-- **Execution ID:** `wuns98j4lffgq015izlfw`
-- **Execution tx:** [`0x72eff34a543a05ba8855f80549a55272cac044b2c55669ec105813732ae5d587`](https://sepolia.etherscan.io/tx/0x72eff34a543a05ba8855f80549a55272cac044b2c55669ec105813732ae5d587) — receipt `status: 0x1`, real Aave Pool `Supply` event + aWETH mint `Transfer` event, block `0xb12aa5`.
-- 5/5 workflow steps succeeded (100%).
+- **Execution ID:** `0iv7xhyx26yp262li06au`
+- **Withdraw tx:** [`0xb90edae1d535382a843437f646a875e05dda30a50b6a713946be89bdc90a7f2a`](https://sepolia.etherscan.io/tx/0xb90edae1d535382a843437f646a875e05dda30a50b6a713946be89bdc90a7f2a) — `status: 0x1`, block 11,611,755.
+- **Approve tx:** [`0x4ce3be7bb871dd919876fdc39e79cbea19bc4f06b457fdea2da31de350d93ba8`](https://sepolia.etherscan.io/tx/0x4ce3be7bb871dd919876fdc39e79cbea19bc4f06b457fdea2da31de350d93ba8) — `status: 0x1`, block 11,611,756, real ERC20 `Approval` event for unlimited allowance to the Pool.
+- **Supply tx:** [`0xbdbdb5ef54e9dedd71b69ba5a3b1fcf0886cfac2c6d0de97bb6822bf9f8988a9`](https://sepolia.etherscan.io/tx/0xbdbdb5ef54e9dedd71b69ba5a3b1fcf0886cfac2c6d0de97bb6822bf9f8988a9) — `status: 0x1`, block 11,611,757, real Aave Pool `Supply` event + aWETH mint `Transfer` event.
+- 6/6 workflow steps succeeded (100%).
+
+An earlier run of the pre-`approve-aave` (5-node) version of this workflow really did fail live
+with `Contract call failed: missing revert data` on `supply-target` once a prior out-of-band
+approval had been fully consumed — that failure is what the `approve-aave` node exists to fix
+permanently. A second failure mode was caught the same way while re-testing the fix: `withdraw-source`
+reverted with `Error(32)` (Aave's `NOT_ENOUGH_AVAILABLE_USER_BALANCE`) because the wallet had no
+supplied aWETH position left to withdraw — the workflow was never broken, there was just nothing
+to migrate. Re-supplying WETH to recreate a position, then re-running the workflow, is what
+produced the transactions above.
 
 ## Setup
 
