@@ -1,8 +1,8 @@
 # MigrateX
 
-Deterministic token migration orchestrator for the KeeperHub Hackathon (Sep 6–18, 2026).
+Deterministic token migration orchestrator, built for the KeeperHub Hackathon (Sep 6–18, 2026).
 
-MigrateX makes **KeeperHub the only execution layer** for DeFi position management: a Rust
+MigrateX makes **KeeperHub the only execution layer** for DeFi position management. A Rust
 policy core computes a deterministic plan, a TypeScript orchestrator turns it into a KeeperHub
 workflow, validates it (`validate_workflow` with `deepCheck: true`), and only then executes it
 via the real KeeperHub MCP server. No agent improvises at execution time — every workflow is a
@@ -10,53 +10,96 @@ fixed, inspectable node graph, and every claim in this repo is backed by a live 
 you can independently verify on Sepolia.
 
 The project targets Aave V3 on Sepolia specifically because it was the only lending market found,
-via live on-chain verification (not documentation), to actually work end to end on this testnet —
-Aave V4 is mainnet-only in KeeperHub's plugin, and the one Sepolia Morpho Blue market this project
-found had never had a market successfully created on it (every historical call reverted).
+via live on-chain verification (not documentation), to actually work end to end on this testnet:
+
+- Aave V4 is registered mainnet-only in KeeperHub's plugin (live `INVALID_FIELD_TYPE` error on
+  Sepolia).
+- The one Sepolia Morpho Blue market this project found had never had a market successfully
+  created on it — every historical `createMarket`/`supply`/`borrow` call on that deployment
+  reverted, and its owner never enabled an IRM or LLTV.
+- Aave V3's Sepolia Pool (`0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951`) was verified live: real
+  bytecode, a real WETH reserve with liquidity, and KeeperHub's `aave-v3` plugin accepting
+  network `11155111` on a real call.
+
+This "verify on-chain, don't trust the docs" discipline is why the schemas used throughout this
+repo were pulled from a live `list_action_schemas` call against the production MCP server, not
+guessed from field names that sound right — see [Node config reference](#node-config-reference)
+for two cases where the obvious field name was wrong.
+
+## Table of contents
+
+- [Architecture](#architecture)
+- [The 4 workflows](#the-4-workflows)
+- [Verified execution](#verified-execution)
+- [Setup](#setup)
+- [Running](#running)
+- [Environment variables](#environment-variables)
+- [Node config reference](#node-config-reference)
+- [Unhappy paths handled](#unhappy-paths-handled)
+- [Tech stack](#tech-stack)
+- [Status](#status)
+- [Bounty track](#bounty-track)
 
 ## Architecture
 
 ```
-rust-core/         p-token-migrator: validates the migration pair, computes amounts and
-                    slippage-adjusted verification thresholds, emits a MigrationPlan as JSON.
+rust-core/           p-token-migrator (Rust, clap + serde). Validates the migration pair,
+                      computes amounts and a slippage-adjusted verification threshold, and
+                      emits a MigrationPlan as JSON. Pure policy logic — it never touches the
+                      network; that's KeeperHub's job.
 
-orchestrator/       TypeScript. Talks JSON-RPC directly to the KeeperHub MCP streamable-HTTP
-                     endpoint (no SDK) and:
-  workflow-builder.ts   builds all 4 workflow graphs below (agent-authored, not templates)
-  keeperhub.ts           MCP client — session handshake, tools/call, response unwrapping
-  dry-run.ts             create_workflow (disabled) + validate_workflow before any real run
-  audit.ts               polls get_execution until terminal, extracts transaction hashes
-  index.ts                CLI entry: --workflow {basic|scheduled|guardian|advanced} [--execute]
-  workflows.json          registry of the 4 live, pre-created workflow IDs (below)
+orchestrator/         TypeScript. Talks JSON-RPC 2.0 directly to the KeeperHub MCP
+                       streamable-HTTP endpoint (no SDK — the protocol was reverse-engineered
+                       by hand against the live server: session handshake via an
+                       `Mcp-Session-Id` response header, tool results wrapped as
+                       `{content:[{type:"text",text:"<json>"}]}`).
+  src/workflow-builder.ts   builds all 4 workflow graphs below (agent-authored, not templates)
+  src/keeperhub.ts           MCP client — session handshake, tools/call, response unwrapping
+  src/dry-run.ts             create_workflow (disabled) + validate_workflow before any real run
+  src/audit.ts               polls get_execution until terminal, extracts transaction hashes
+  src/index.ts                CLI entry: --workflow {basic|scheduled|guardian|advanced} [--execute]
+  workflows.json              registry of the 4 live, pre-created workflow IDs (below)
 
-ui/                 Next.js app. Real Server Actions call the same Rust binary and
-                     KeeperHubClient the CLI uses — no simulated/mocked data path.
+ui/                  Next.js 16 (App Router, Turbopack) app. Real Server Actions call the same
+                      compiled Rust binary and the same KeeperHubClient the CLI uses — there is
+                      no simulated or mocked data path between the browser and the live chain.
+  app/actions.ts             Server Actions: generatePlan / runDryRun / runExecution
+  app/MigrationConsole.tsx    client console wired to the actions above via useTransition
+  app/components/            editorial landing page (hero, how-it-works, architecture, canvas
+                              particle animations) + the live 6-step execution monitor (ExecPanel)
+  lib/                        copies of orchestrator/src, .js import extensions stripped —
+                              Turbopack can't resolve either relative imports outside its own
+                              project root or TypeScript's NodeNext .js→.ts extension trick, so
+                              this directory exists purely as a build-tool workaround, not a
+                              second implementation. Keep it in sync with orchestrator/src by
+                              hand after any change there.
 ```
 
 ## The 4 workflows
 
 All 4 are real, created via `create_workflow` against the live KeeperHub MCP server and
-confirmed `valid: true` via `validate_workflow(deepCheck: true)`.
+confirmed `valid: true` via `validate_workflow(deepCheck: true)` — zero errors, zero warnings.
 
 | Kind | Workflow ID | Nodes | What it does |
 |---|---|---|---|
-| `basic` | `92r20hpg5rba6yp2s6j76` | 5 | Manual trigger. Withdraw → verify → supply → verify, within Aave V3 Sepolia. **Executed live** — see [Verified execution](#verified-execution) below. |
-| `scheduled` | `6mfi90pptg2qtv5crmmf1` | 6 | Every 6h (`0 */6 * * *`), reads the live Aave V3 supply APY (`aave-v3/get-user-reserve-data.liquidityRate`); if it's below 3%, withdraws and re-supplies 0.005 WETH, then logs the final balance either way. |
+| `basic` | [`92r20hpg5rba6yp2s6j76`](https://app.keeperhub.com) | 5 | Manual trigger. Withdraw → verify → supply → verify, within Aave V3 Sepolia. **Executed live** — see [Verified execution](#verified-execution) below. |
+| `scheduled` | `6mfi90pptg2qtv5crmmf1` | 6 | Every 6h (`0 */6 * * *`), reads the live Aave V3 supply APY (`aave-v3/get-user-reserve-data.liquidityRate`, in ray units); if it's below 3%, withdraws and re-supplies 0.005 WETH, then logs the final balance either way. |
 | `guardian` | `awiys098yh7v2b9i5f8m1` | 5 | Hourly poll of the aWETH balance; if it drops below 0.004 (possible liquidation or an out-of-band withdrawal), runs a full Aave V3 health check and verifies the remaining gas balance. |
-| `advanced` | `ma6epf75fjdsonscq8roc` | 11 | Flagship. Pre-flight position check → balance gate → withdraw → receipt gate → supply → final verify, with dedicated `abort-log` and `alert-hold` off-ramps if either gate fails. |
+| `advanced` | `ma6epf75fjdsonscq8roc` | 11 | Flagship. Pre-flight position check → balance gate → withdraw → receipt gate → supply → final verify, with dedicated `abort-log` and `alert-hold` off-ramps if either verification gate fails. |
 
 Run any of them:
 
 ```bash
 cd orchestrator
-node dist/index.js --workflow scheduled          # validates the pre-created workflow (dry run)
-node dist/index.js --workflow advanced --execute  # validates, then actually executes it
+node dist/index.js --workflow scheduled           # validates the pre-created workflow (dry run)
+node dist/index.js --workflow advanced --execute   # validates, then actually executes it
 node dist/index.js --workflow basic --plan ../plan.json --execute   # basic needs a plan
 ```
 
 `--workflow` defaults to `advanced`. `scheduled`/`guardian`/`advanced` reference the fixed IDs in
 `workflows.json` rather than creating a new workflow per run; `basic` is the only kind still built
-per-invocation from a `MigrationPlan` (via `--plan` or `--rust-bin`).
+per-invocation from a `MigrationPlan` (via `--plan` or `--rust-bin`), since it's the one that
+actually moves a specific user's specific position rather than monitoring a fixed one.
 
 ### `basic` workflow graph (the one that has actually executed on-chain)
 
@@ -68,13 +111,29 @@ trigger-1 (manual)
         -> verify-supply (web3/check-token-balance)
 ```
 
+### `advanced` workflow graph (the flagship)
+
+```
+trigger-1 (manual)
+  -> preflight        (aave-v3/get-user-reserve-data)
+    -> check-aweth     (web3/check-token-balance)
+      -> cond-balance  (Condition: aWETH balance >= amount)
+        --true--> withdraw        (aave-v3/withdraw)
+          -> check-weth            (web3/check-token-balance)
+            -> cond-weth           (Condition: WETH received >= amount)
+              --true--> supply     (aave-v3/supply)
+                -> final-verify     (web3/check-token-balance)
+              --false-> alert-hold (web3/check-token-balance — funds held as WETH, flagged)
+        --false-> abort-log (web3/check-token-balance — logged, nothing executed)
+```
+
 ## Verified execution
 
 Real Sepolia testnet run of the `basic` workflow, independently confirmed via a direct
-`eth_getTransactionReceipt` call (not just KeeperHub's own "success" response):
+`eth_getTransactionReceipt` call — not just KeeperHub's own "success" response:
 
 - **Execution ID:** `wuns98j4lffgq015izlfw`
-- **Execution tx:** [`0x72eff34a543a05ba8855f80549a55272cac044b2c55669ec105813732ae5d587`](https://sepolia.etherscan.io/tx/0x72eff34a543a05ba8855f80549a55272cac044b2c55669ec105813732ae5d587) — receipt `status: 0x1`, real Aave Pool `Supply` event + aWETH mint `Transfer` event.
+- **Execution tx:** [`0x72eff34a543a05ba8855f80549a55272cac044b2c55669ec105813732ae5d587`](https://sepolia.etherscan.io/tx/0x72eff34a543a05ba8855f80549a55272cac044b2c55669ec105813732ae5d587) — receipt `status: 0x1`, real Aave Pool `Supply` event + aWETH mint `Transfer` event, block `0xb12aa5`.
 - 5/5 workflow steps succeeded (100%).
 
 ## Setup
@@ -108,6 +167,43 @@ node dist/index.js --workflow advanced --execute
 cd ../ui && npm install && npm run dev -- -p 3200
 ```
 
+You can also hand the CLI a pre-computed plan instead of shelling out to Rust — useful for the
+`basic` workflow with a specific amount/address pair:
+
+```bash
+./rust-core/target/release/p-token-migrator \
+  --source-protocol aave-v3 --target-protocol aave-v3 --token WETH --amount 0.005 \
+  --network 11155111 \
+  --source-address 0xYourAddress --recipient-address 0xYourAddress \
+  --output-plan > plan.json
+
+cd orchestrator && node dist/index.js --workflow basic --plan ../plan.json --execute
+```
+
+## Environment variables
+
+| Variable | Where | Required | Notes |
+|---|---|---|---|
+| `KEEPERHUB_API_KEY` | `orchestrator/.env`, `ui/.env.local` | yes | Bearer token from `kh auth login`. Never commit this — both `.env` files are gitignored. |
+| `KEEPERHUB_MCP_URL` | same | no | Defaults to `https://app.keeperhub.com/mcp`. Override only for local KeeperHub dev servers. |
+
+`orchestrator/.env.example` documents both with empty values — copy it to `.env` and fill in the
+real key.
+
+## Node config reference
+
+Every field below was confirmed against a live `list_action_schemas` call, not assumed from a
+plausible-sounding name — this table exists because several of the obvious names are wrong:
+
+| Node | actionType / triggerType | Gotcha |
+|---|---|---|
+| Scheduled trigger | `Schedule` | Cron goes in **`scheduleCron`**, not `cron`. `validate_cron` (a separate tool) uses a third name, `cronExpression`, for the same concept. |
+| Condition | `Condition` (capital C) | The field is **`condition`** (a JS-like expression string, e.g. `"{{@node:Label.field}} < 5"`), not `expression`. `conditionConfig` is a *different*, optional visual-builder shape — don't use it for a plain expression. |
+| `aave-v3/get-user-reserve-data` | — | Supply APY output field is **`liquidityRate`** (ray units, 1e27 = 100%), not `currentLiquidityRate` — that field doesn't exist. |
+| `web3/check-token-balance` | — | Raw balance lives at **`balance.balanceRaw`** (a nested object), not a flat `balance` field. `tokenConfig` must be the JSON string `{"mode":"custom","customToken":{"address":"0x...","symbol":"..."}}` — a flat `{address,symbol,decimals}` object is silently wrong. |
+| `aave-v3/supply` | — | `referralCode` is marked *optional* in the schema but is required in practice — omitting it fails with `Invalid function arguments: referralCode: uint16 is missing`. Always send `"0"`. |
+| Any node | — | `network` (chain ID as a string) is a deprecated-but-still-accepted alias for the canonical `chainId` field. Both work; this repo uses `network` throughout for consistency with the Rust plan's own field name. |
+
 ## Unhappy paths handled
 
 - `insufficient_balance` from the source protocol read — surfaced with the required minimum.
@@ -121,13 +217,22 @@ cd ../ui && npm install && npm run dev -- -p 3200
   development; the workflow's own `verify-*` nodes surface a stuck position rather than a
   silent partial migration.
 
+## Tech stack
+
+- **rust-core** — Rust, `clap` (derive), `serde`/`serde_json`.
+- **orchestrator** — Node.js ≥20, TypeScript, zero runtime dependencies (built-in `fetch` for
+  the MCP client; no MCP SDK).
+- **ui** — Next.js 16 (App Router, Turbopack), React 19, Tailwind CSS v4, Server Actions,
+  Canvas 2D for the particle/animation layer, `next/font/google` (Instrument Serif, Great Vibes,
+  Space Mono, DM Sans).
+- **Execution layer** — KeeperHub MCP (streamable-HTTP JSON-RPC), Sepolia testnet, Aave V3.
+
 ## Status
 
 - [x] Rust policy core (`p-token-migrator --output-plan`) with pair/address/amount validation
       and unit tests.
 - [x] TypeScript workflow builder producing all 4 graphs above from real, schema-verified node
-      configs (not assumed from docs — every action/trigger/condition field was confirmed
-      against a live `list_action_schemas` dump before use).
+      configs.
 - [x] KeeperHub MCP client, dry-run flow, audit polling, all exercised against the live
       production MCP server.
 - [x] All 4 workflows created and `validate_workflow(deepCheck: true)`-passing on KeeperHub.
