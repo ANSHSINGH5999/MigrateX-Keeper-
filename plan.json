@@ -1,0 +1,14 @@
+{
+  "source_protocol": "aave-v3",
+  "target_protocol": "aave-v4",
+  "token": "USDC",
+  "amount": "100",
+  "network": "11155111",
+  "source_address": "0x11F1a6f2119dB47840c7B5B45EE289CE2E64E7B2",
+  "recipient_address": "0x11F1a6f2119dB47840c7B5B45EE289CE2E64E7B2",
+  "threshold": "100",
+  "min_expected_target_amount": "99.5",
+  "slippage_bps": 50,
+  "aave_v4_hub": "0x3333333333333333333333333333333333333333",
+  "aave_v4_asset_id": "1"
+}

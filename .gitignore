@@ -1,0 +1,8 @@
+/rust-core/target
+/orchestrator/node_modules
+/orchestrator/dist
+/ui/node_modules
+/ui/.next
+.env
+.env.local
+*.log

@@ -1,0 +1,22 @@
+{
+  "name": "migratex-orchestrator",
+  "version": "0.1.0",
+  "description": "TypeScript orchestrator that turns a p-token-migrator plan into a KeeperHub-executed migration workflow",
+  "type": "module",
+  "bin": {
+    "migratex": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node --experimental-strip-types src/index.ts",
+    "test": "npm run build && node --test dist/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "@types/node": "^22.10.2"
+  }
+}
