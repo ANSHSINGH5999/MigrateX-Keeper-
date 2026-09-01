@@ -1,4 +1,3 @@
-// Copy of orchestrator/src/types.ts -- Turbopack won't resolve imports outside ui/'s project root, so this is duplicated rather than shared.
 /** Output shape of `p-token-migrator --output-plan`. */
 export interface MigrationPlan {
   source_protocol: string;

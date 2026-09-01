@@ -1,4 +1,3 @@
-// Copy of orchestrator/src/workflow-builder.ts -- Turbopack won't resolve imports outside ui/'s project root, so this is duplicated rather than shared.
 import type { KeeperHubWorkflow, MigrationPlan, WorkflowEdge, WorkflowNode } from "./types";
 
 /**
@@ -20,6 +19,10 @@ import type { KeeperHubWorkflow, MigrationPlan, WorkflowEdge, WorkflowNode } fro
 const TOKENS: Record<string, Record<string, { address: string; decimals: number }>> = {
   "11155111": {
     WETH: { address: "0xC558DBdd856501FCd9aaF1E62eae57A9F0629a3c", decimals: 18 },
+    // aWETH: Aave V3 Sepolia's interest-bearing receipt token for the WETH
+    // reserve above (1:1 backed). Confirmed live: minted to the recipient
+    // on every successful aave-v3/supply this project has run.
+    aWETH: { address: "0x5b071b590a59395fE4025A0Ccc1FcC931AAc1830", decimals: 18 },
   },
 };
 
@@ -53,6 +56,27 @@ function triggerNode(): WorkflowNode {
   };
 }
 
+/**
+ * Schedule trigger. Field name is `scheduleCron` (NOT `cron`) -- confirmed
+ * against the live list_action_schemas dump; `validate_cron` also expects
+ * `cronExpression`, a third, different name for the same concept.
+ */
+function scheduleTriggerNode(cron: string, timezone?: string): WorkflowNode {
+  return {
+    id: "trigger-1",
+    type: "trigger",
+    position: { x: 0, y: 0 },
+    data: {
+      type: "trigger",
+      config: {
+        triggerType: "Schedule",
+        scheduleCron: cron,
+        ...(timezone ? { scheduleTimezone: timezone } : {}),
+      },
+    },
+  };
+}
+
 function actionNode(id: string, y: number, config: Record<string, unknown>): WorkflowNode {
   return {
     id,
@@ -62,8 +86,21 @@ function actionNode(id: string, y: number, config: Record<string, unknown>): Wor
   };
 }
 
-function edge(source: string, target: string): WorkflowEdge {
-  return { id: `${source}-${target}`, source, target };
+/**
+ * Condition node -- NOT a distinct `data.type`; it's an action node whose
+ * `actionType` is exactly `"Condition"` (capital C). The required field is
+ * `condition`, a JS-like expression string (e.g.
+ * `"{{@node:Label.field}} < 5"`), not `expression` or `conditionConfig`
+ * (that's the optional visual-builder variant) -- confirmed against the
+ * live list_action_schemas dump. Edges leaving it need `sourceHandle`.
+ */
+function conditionNode(id: string, y: number, condition: string): WorkflowNode {
+  return actionNode(id, y, { actionType: "Condition", condition });
+}
+
+function edge(source: string, target: string, sourceHandle?: "true" | "false"): WorkflowEdge {
+  const suffix = sourceHandle ? `-${sourceHandle}` : "";
+  return { id: `${source}-${target}${suffix}`, source, target, ...(sourceHandle ? { sourceHandle } : {}) };
 }
 
 /**
@@ -139,6 +176,226 @@ export function buildMigrationWorkflow(plan: MigrationPlan): KeeperHubWorkflow {
   return {
     name: `migrate-${plan.token}-aave-v3-to-aave-v3`,
     description: `Migrate ${plan.amount} ${plan.token} within Aave V3 on chain ${plan.network}`,
+    nodes,
+    edges,
+  };
+}
+
+export interface MonitorConfig {
+  network: string;
+  /** Wallet address whose Aave V3 position / balances are monitored. */
+  user: string;
+}
+
+/**
+ * WORKFLOW 2 -- Scheduled APY Monitor + Auto-migrate.
+ * Fires every 6h, reads the live Aave V3 supply APY (`liquidityRate`, in
+ * ray units -- NOT `currentLiquidityRate`, which doesn't exist on this
+ * action's output; confirmed against list_action_schemas), and if it has
+ * dropped below 3% withdraws + re-supplies 0.005 WETH (a same-market
+ * round trip stands in for "migrate to a better market" until a second
+ * live Sepolia lending market is available to compare against). Both
+ * branches converge on a final balance log.
+ */
+export function buildApyMonitorWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const { address: weth } = tokenInfo(cfg.network, "WETH");
+  const amount = "5000000000000000"; // 0.005 WETH
+
+  const nodes: WorkflowNode[] = [
+    scheduleTriggerNode("0 */6 * * *", "UTC"),
+    actionNode("read-reserve", 200, {
+      actionType: "aave-v3/get-user-reserve-data",
+      network: cfg.network,
+      asset: weth,
+      user: cfg.user,
+    }),
+    conditionNode(
+      "apy-check",
+      400,
+      // 3% APY in ray units (1e27 == 100%) => 3e25.
+      "{{@read-reserve:Reserve.liquidityRate}} < 30000000000000000000000000"
+    ),
+    actionNode("withdraw-low", 600, {
+      actionType: "aave-v3/withdraw",
+      network: cfg.network,
+      asset: weth,
+      amount,
+      to: cfg.user,
+    }),
+    actionNode("resupply-low", 800, {
+      actionType: "aave-v3/supply",
+      network: cfg.network,
+      asset: weth,
+      amount,
+      onBehalfOf: cfg.user,
+      referralCode: "0",
+    }),
+    actionNode("log-state", 1000, {
+      actionType: "web3/check-token-balance",
+      network: cfg.network,
+      address: cfg.user,
+      tokenConfig: tokenConfig(cfg.network, "WETH"),
+    }),
+  ];
+
+  const edges: WorkflowEdge[] = [
+    edge("trigger-1", "read-reserve"),
+    edge("read-reserve", "apy-check"),
+    edge("apy-check", "withdraw-low", "true"),
+    edge("apy-check", "log-state", "false"),
+    edge("withdraw-low", "resupply-low"),
+    edge("resupply-low", "log-state"),
+  ];
+
+  return {
+    name: "apy-monitor-auto-migrate",
+    description: "Every 6h: read Aave V3 supply APY; if below 3%, withdraw and re-supply 0.005 WETH, then log final balance.",
+    nodes,
+    edges,
+  };
+}
+
+/**
+ * WORKFLOW 3 -- Balance Guardian.
+ * KeeperHub triggers only support a fixed set (Manual/Schedule/Webhook/
+ * Event/Block) -- there is no generic "balance drops below X" trigger
+ * type, so the spec's "web3 event" trigger is implemented as an hourly
+ * Schedule poll (the spec's own stated "polling fallback"), which is the
+ * only live option that actually exists.
+ */
+export function buildBalanceGuardianWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const { address: weth } = tokenInfo(cfg.network, "WETH");
+
+  const nodes: WorkflowNode[] = [
+    scheduleTriggerNode("0 * * * *", "UTC"),
+    actionNode("check-bal", 200, {
+      actionType: "web3/check-token-balance",
+      network: cfg.network,
+      address: cfg.user,
+      tokenConfig: tokenConfig(cfg.network, "aWETH"),
+    }),
+    conditionNode(
+      "bal-check",
+      400,
+      // check-token-balance's raw amount lives at `balance.balanceRaw`, not
+      // a flat `balance` field -- confirmed against list_action_schemas.
+      "{{@check-bal:Balance.balance.balanceRaw}} < 4000000000000000"
+    ),
+    actionNode("health-check", 600, {
+      actionType: "aave-v3/get-user-reserve-data",
+      network: cfg.network,
+      asset: weth,
+      user: cfg.user,
+    }),
+    actionNode("gas-check", 800, {
+      actionType: "web3/check-balance",
+      network: cfg.network,
+      address: cfg.user,
+    }),
+  ];
+
+  const edges: WorkflowEdge[] = [
+    edge("trigger-1", "check-bal"),
+    edge("check-bal", "bal-check"),
+    edge("bal-check", "health-check", "true"),
+    edge("health-check", "gas-check"),
+    // false branch: intentionally no edge -- position is healthy, stop.
+  ];
+
+  return {
+    name: "balance-guardian",
+    description: "Hourly: check aWETH balance; if below 0.004 (possible liquidation/withdrawal), run a full Aave V3 health check and verify remaining gas balance.",
+    nodes,
+    edges,
+  };
+}
+
+/**
+ * WORKFLOW 4 -- Multi-step Migration with Verification Gates (flagship).
+ * The spec numbers two DIFFERENT nodes "Node 8" (abort vs. supply) and two
+ * different nodes "Node 9" (alert vs. final verify) -- a literal build
+ * would collide two node ids. Fixed by giving each terminal branch (abort,
+ * alert-and-hold) its own node id instead of reusing a number; the gating
+ * logic itself (pre-flight -> balance gate -> withdraw -> receipt gate ->
+ * supply -> final verify, with two off-ramps) is unchanged from the spec.
+ */
+export function buildAdvancedMigrationWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const { address: weth } = tokenInfo(cfg.network, "WETH");
+  const amount = "5000000000000000"; // 0.005 WETH
+
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("preflight", 200, {
+      actionType: "aave-v3/get-user-reserve-data",
+      network: cfg.network,
+      asset: weth,
+      user: cfg.user,
+    }),
+    actionNode("check-aweth", 400, {
+      actionType: "web3/check-token-balance",
+      network: cfg.network,
+      address: cfg.user,
+      tokenConfig: tokenConfig(cfg.network, "aWETH"),
+    }),
+    conditionNode("cond-balance", 600, `{{@check-aweth:Balance.balance.balanceRaw}} >= ${amount}`),
+    actionNode("withdraw", 800, {
+      actionType: "aave-v3/withdraw",
+      network: cfg.network,
+      asset: weth,
+      amount,
+      to: cfg.user,
+    }),
+    actionNode("check-weth", 1000, {
+      actionType: "web3/check-token-balance",
+      network: cfg.network,
+      address: cfg.user,
+      tokenConfig: tokenConfig(cfg.network, "WETH"),
+    }),
+    conditionNode("cond-weth", 1200, `{{@check-weth:Balance.balance.balanceRaw}} >= ${amount}`),
+    actionNode("supply", 1400, {
+      actionType: "aave-v3/supply",
+      network: cfg.network,
+      asset: weth,
+      amount,
+      onBehalfOf: cfg.user,
+      referralCode: "0",
+    }),
+    actionNode("final-verify", 1600, {
+      actionType: "web3/check-token-balance",
+      network: cfg.network,
+      address: cfg.user,
+      tokenConfig: tokenConfig(cfg.network, "aWETH"),
+    }),
+    actionNode("abort-log", 400, {
+      actionType: "web3/check-token-balance",
+      network: cfg.network,
+      address: cfg.user,
+      tokenConfig: tokenConfig(cfg.network, "aWETH"),
+    }),
+    actionNode("alert-hold", 1000, {
+      actionType: "web3/check-token-balance",
+      network: cfg.network,
+      address: cfg.user,
+      tokenConfig: tokenConfig(cfg.network, "WETH"),
+    }),
+  ];
+
+  const edges: WorkflowEdge[] = [
+    edge("trigger-1", "preflight"),
+    edge("preflight", "check-aweth"),
+    edge("check-aweth", "cond-balance"),
+    edge("cond-balance", "withdraw", "true"),
+    edge("cond-balance", "abort-log", "false"),
+    edge("withdraw", "check-weth"),
+    edge("check-weth", "cond-weth"),
+    edge("cond-weth", "supply", "true"),
+    edge("cond-weth", "alert-hold", "false"),
+    edge("supply", "final-verify"),
+  ];
+
+  return {
+    name: "advanced-migration-verification-gates",
+    description: "Pre-flight check -> balance gate -> withdraw -> receipt gate -> supply -> final verify, with dedicated abort and alert-and-hold off-ramps.",
     nodes,
     edges,
   };

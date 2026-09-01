@@ -2,6 +2,8 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 
 import { KeeperHubClient } from "./keeperhub.js";
 import { buildMigrationWorkflow } from "./workflow-builder.js";
@@ -9,21 +11,50 @@ import { dryRun, explainDryRunFailure } from "./dry-run.js";
 import { pollUntilTerminal, summarizeAuditTrail, extractTransactionHashes } from "./audit.js";
 import type { MigrationPlan } from "./types.js";
 
+type WorkflowKind = "basic" | "scheduled" | "guardian" | "advanced";
+const WORKFLOW_KINDS: WorkflowKind[] = ["basic", "scheduled", "guardian", "advanced"];
+
 interface Cli {
   planFile?: string;
   rustBin?: string;
   execute: boolean;
+  workflowKind: WorkflowKind;
 }
 
 function parseArgs(argv: string[]): Cli {
-  const cli: Cli = { execute: false };
+  const cli: Cli = { execute: false, workflowKind: "advanced" };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--plan") cli.planFile = argv[++i];
     else if (arg === "--rust-bin") cli.rustBin = argv[++i];
     else if (arg === "--execute") cli.execute = true;
+    else if (arg === "--workflow") {
+      const kind = argv[++i] as WorkflowKind;
+      if (!WORKFLOW_KINDS.includes(kind)) {
+        throw new Error(`--workflow must be one of ${WORKFLOW_KINDS.join(", ")}; got '${kind}'`);
+      }
+      cli.workflowKind = kind;
+    }
   }
   return cli;
+}
+
+/**
+ * scheduled/guardian/advanced are pre-created, persistent automations
+ * (built once via workflow-builder.ts and registered in workflows.json) --
+ * unlike "basic" they don't come from a per-run MigrationPlan, so running
+ * the CLI against them validates + optionally executes the SAME workflow
+ * every time rather than creating a new one.
+ */
+function loadWorkflowId(kind: Exclude<WorkflowKind, "basic">): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const registryPath = path.join(here, "..", "workflows.json");
+  const registry = JSON.parse(readFileSync(registryPath, "utf8")) as Record<string, string>;
+  const id = registry[kind];
+  if (!id) {
+    throw new Error(`No workflow id for '${kind}' in ${registryPath}`);
+  }
+  return id;
 }
 
 /** Loads a plan either from a pre-computed JSON file or by shelling out to the Rust policy core. */
@@ -40,7 +71,6 @@ function loadPlan(cli: Cli): MigrationPlan {
 
 async function main() {
   const cli = parseArgs(process.argv.slice(2));
-  const plan = loadPlan(cli);
 
   const apiKey = process.env.KEEPERHUB_API_KEY;
   if (!apiKey) {
@@ -53,29 +83,47 @@ async function main() {
     mcpUrl: process.env.KEEPERHUB_MCP_URL,
   });
 
-  console.log(`Plan: migrate ${plan.amount} ${plan.token} ${plan.source_protocol} -> ${plan.target_protocol} (chain ${plan.network})`);
+  console.log(`Workflow: ${cli.workflowKind}`);
 
-  const workflow = buildMigrationWorkflow(plan);
-  console.log(`Built workflow '${workflow.name}' with ${workflow.nodes.length} nodes.`);
+  let workflowId: string;
 
-  console.log("Running dry-run (create_workflow disabled + validate_workflow deepCheck)...");
-  const report = await dryRun(client, workflow);
-  console.log(`Workflow created: ${report.workflowId}`);
-  console.log(explainDryRunFailure(report));
+  if (cli.workflowKind === "basic") {
+    const plan = loadPlan(cli);
+    console.log(`Plan: migrate ${plan.amount} ${plan.token} ${plan.source_protocol} -> ${plan.target_protocol} (chain ${plan.network})`);
 
-  if (!report.safeToExecute) {
-    console.error("Dry run failed — refusing to execute. See message above.");
-    process.exitCode = 1;
-    return;
+    const workflow = buildMigrationWorkflow(plan);
+    console.log(`Built workflow '${workflow.name}' with ${workflow.nodes.length} nodes.`);
+
+    console.log("Running dry-run (create_workflow disabled + validate_workflow deepCheck)...");
+    const report = await dryRun(client, workflow);
+    console.log(`Workflow created: ${report.workflowId}`);
+    console.log(explainDryRunFailure(report));
+
+    if (!report.safeToExecute) {
+      console.error("Dry run failed — refusing to execute. See message above.");
+      process.exitCode = 1;
+      return;
+    }
+    workflowId = report.workflowId;
+  } else {
+    workflowId = loadWorkflowId(cli.workflowKind);
+    console.log(`Validating pre-created workflow ${workflowId} (deepCheck)...`);
+    const validation = await client.validateWorkflow(workflowId, { deepCheck: true });
+    console.log(JSON.stringify(validation, null, 2));
+    if (!validation.valid) {
+      console.error("Validation failed — refusing to execute. See errors above.");
+      process.exitCode = 1;
+      return;
+    }
   }
 
   if (!cli.execute) {
-    console.log("Dry run passed. Re-run with --execute to run the already-created workflow on KeeperHub.");
+    console.log("Dry run / validation passed. Re-run with --execute to run this workflow on KeeperHub.");
     return;
   }
 
   const idempotencyKey = randomUUID();
-  const { executionId } = await executeWithColdStartRetry(client, report.workflowId, idempotencyKey);
+  const { executionId } = await executeWithColdStartRetry(client, workflowId, idempotencyKey);
   console.log(`Execution started: ${executionId}`);
 
   const result = await pollUntilTerminal(client, executionId, {

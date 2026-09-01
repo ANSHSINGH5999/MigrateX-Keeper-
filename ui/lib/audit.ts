@@ -1,4 +1,3 @@
-// Copy of orchestrator/src/audit.ts -- Turbopack won't resolve imports outside ui/'s project root, so this is duplicated rather than shared.
 import type { KeeperHubClient } from "./keeperhub";
 import type { ExecutionResult, TransactionReceipt } from "./types";
 
