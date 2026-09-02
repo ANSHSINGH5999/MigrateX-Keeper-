@@ -10,6 +10,7 @@ export default function Nav() {
           {[
             ["How it works", "#how-it-works"],
             ["Console", "#console"],
+            ["Catalog", "#catalog"],
             ["Monitor", "#monitor"],
             ["Audit Trail", "#exec-panel"],
           ].map(([label, href]) => (

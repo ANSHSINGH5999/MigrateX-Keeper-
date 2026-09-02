@@ -1,6 +1,7 @@
 "use server";
 
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import path from "node:path";
 
@@ -93,6 +94,61 @@ export async function runExecution(workflowId: string): Promise<ExecutionUiResul
       summary: summarizeAuditTrail(result),
       transactions: extractTransactionHashes(result),
     };
+  } catch (err) {
+    return { ok: false, error: describeError(err) };
+  }
+}
+
+interface WorkflowRegistryFile {
+  basic: string;
+  scheduled: string;
+  guardian: string;
+  advanced: string;
+  emergency: string;
+  features: Record<string, string>;
+  leverage: Record<string, string>;
+  integrations: Record<string, string>;
+}
+
+export interface CatalogEntry {
+  key: string;
+  category: "core" | "feature" | "leverage" | "integration";
+  workflowId: string;
+}
+
+/**
+ * Reads the same orchestrator/workflows.json the CLI's --workflow/--feature
+ * flags read -- one registry, two front ends (CLI and this catalog), never
+ * duplicated. "basic" is intentionally excluded: it's built fresh per plan
+ * (see generatePlan/runDryRun above), not a fixed pre-created id like the
+ * other 37.
+ */
+export async function listWorkflowCatalog(): Promise<CatalogEntry[]> {
+  const registryPath = path.join(process.cwd(), "..", "orchestrator", "workflows.json");
+  const raw = await readFile(registryPath, "utf8");
+  const registry = JSON.parse(raw) as WorkflowRegistryFile;
+
+  const entries: CatalogEntry[] = [
+    { key: "scheduled", category: "core", workflowId: registry.scheduled },
+    { key: "guardian", category: "core", workflowId: registry.guardian },
+    { key: "advanced", category: "core", workflowId: registry.advanced },
+    { key: "emergency", category: "core", workflowId: registry.emergency },
+  ];
+  for (const [key, workflowId] of Object.entries(registry.features)) entries.push({ key, category: "feature", workflowId });
+  for (const [key, workflowId] of Object.entries(registry.leverage)) entries.push({ key, category: "leverage", workflowId });
+  for (const [key, workflowId] of Object.entries(registry.integrations)) entries.push({ key, category: "integration", workflowId });
+  return entries;
+}
+
+export type ValidateResult =
+  | { ok: true; valid: boolean; nodeCount: number; errors: unknown; warnings: unknown }
+  | { ok: false; error: string };
+
+/** Validates any workflow by id -- deepCheck against the live server, same as `node dist/index.js --feature <name>` without --execute. */
+export async function validateWorkflowById(workflowId: string): Promise<ValidateResult> {
+  try {
+    const validation = await getClient().validateWorkflow(workflowId, { deepCheck: true });
+    return { ok: true, valid: validation.valid, nodeCount: validation.nodeCount, errors: validation.errors ?? null, warnings: validation.warnings ?? null };
   } catch (err) {
     return { ok: false, error: describeError(err) };
   }

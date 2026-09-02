@@ -7,6 +7,7 @@ import ExecPanel from "./components/ExecPanel";
 import CTA from "./components/CTA";
 import Footer from "./components/Footer";
 import MigrationConsole from "./MigrationConsole";
+import WorkflowCatalog from "./components/WorkflowCatalog";
 import Reveal from "./components/Reveal";
 
 export default function Home() {
@@ -17,6 +18,7 @@ export default function Home() {
       <Marquee />
       <HowItWorks />
       <MigrationConsole />
+      <WorkflowCatalog />
       <Architecture />
       <Reveal className="block">
         <ExecPanel />
