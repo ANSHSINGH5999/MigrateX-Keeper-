@@ -1,13 +1,22 @@
 # MigrateX
 
-Deterministic token migration orchestrator, built for the KeeperHub Hackathon (Sep 6–18, 2026).
+An integration of KeeperHub into **ElizaOS** — a real, actively maintained AI agent framework
+(~19.2k GitHub stars) that KeeperHub itself names as a partner: *"ElizaOS agents plug into
+KeeperHub for reliable on-chain execution"* ([keeperhub.com/integrations](https://keeperhub.com/integrations)).
+Built for the KeeperHub Hackathon (Sep 6–18, 2026).
 
-MigrateX makes **KeeperHub the only execution layer** for DeFi position management. A Rust
-policy core computes a deterministic plan, a TypeScript orchestrator turns it into a KeeperHub
-workflow, validates it (`validate_workflow` with `deepCheck: true`), and only then executes it
-via the real KeeperHub MCP server. No agent improvises at execution time — every workflow is a
+An ElizaOS agent reasons — probabilistically, in natural language — about which pre-built,
+already-validated Aave V3 position-management workflow to run. KeeperHub then executes that
+exact workflow deterministically: no agent improvises at execution time, every workflow is a
 fixed, inspectable node graph, and every claim in this repo is backed by a live transaction hash
-you can independently verify on Sepolia.
+or execution ID you can independently verify on Sepolia. See
+[`eliza-agent/README.md`](./eliza-agent/README.md) for the integration itself, verified live with
+a local, free LLM (Ollama) autonomously selecting and executing a real KeeperHub workflow.
+
+Underneath the agent layer, MigrateX makes **KeeperHub the only execution layer** for DeFi
+position management: a Rust policy core computes a deterministic plan, a TypeScript orchestrator
+turns it into a KeeperHub workflow, validates it (`validate_workflow` with `deepCheck: true`),
+and only then executes it via the real KeeperHub MCP server.
 
 The project targets Aave V3 on Sepolia specifically because it was the only lending market found,
 via live on-chain verification (not documentation), to actually work end to end on this testnet:
@@ -28,6 +37,7 @@ for two cases where the obvious field name was wrong.
 
 ## Table of contents
 
+- [ElizaOS integration](#elizaos-integration)
 - [Architecture](#architecture)
 - [The 5 workflows](#the-5-workflows)
 - [Verified execution](#verified-execution)
@@ -44,6 +54,35 @@ for two cases where the obvious field name was wrong.
 - [Tech stack](#tech-stack)
 - [Status](#status)
 - [Bounty track](#bounty-track)
+
+## ElizaOS integration
+
+**Which project did you integrate with, and what does the integration do?** [ElizaOS](https://github.com/elizaOS/eliza)
+— a real, actively maintained AI agent framework (~19.2k stars, commits landing same-day) that
+KeeperHub itself lists as a partner integration. `eliza-agent/` is a real `AgentRuntime` with one
+custom action, `RUN_KEEPERHUB_WORKFLOW`: given a natural-language event, the agent's LLM decides
+whether and which pre-built MigrateX workflow to run (from `orchestrator/workflows.json`), then
+that exact workflow executes deterministically through the real KeeperHub MCP server.
+
+**Which KeeperHub surfaces did you use?** MCP (the same JSON-RPC streamable-HTTP client used
+throughout this repo), agent-authored workflow selection (the ElizaOS agent picks *which*
+already-built workflow to run, never *how* it executes), and the full audit trail
+(`get_execution`, independently cross-checked against raw `eth_getTransactionReceipt` calls
+throughout this project).
+
+**Testnet or mainnet?** Sepolia testnet (chain `11155111`).
+
+**What still breaks or is unfinished?** Two real things, found and documented rather than
+hidden: `@elizaos/core` 1.7.2 has a genuine database-migration ordering bug in its own
+`AgentRuntime.initialize()` (worked around, documented in `eliza-agent/README.md`); and the
+agent's LLM-driven action selection is unreliable with small local models without
+`@elizaos/plugin-bootstrap` installed (it silently defaults to a generic reply) — installing that
+plugin fixed it completely, verified live. The trigger in this repo is a CLI argument standing in
+for a webhook/chat event; wiring a real webhook route (a documented ElizaOS mechanism, not
+built) is the natural next step, not a limitation of the execution path itself.
+
+See [`eliza-agent/README.md`](./eliza-agent/README.md) for the full write-up, setup steps, and
+the real agent reasoning output from a live run.
 
 ## Architecture
 
@@ -397,6 +436,14 @@ real KeeperHub project, created and verified live via `create_project` / `create
 
 Real KeeperHub capabilities that were found and tested while building this, but deliberately not
 built into a full feature — with the specific, tested reason for each:
+
+**Daydreams** (an agent framework, one alternative considered before settling on ElizaOS) was
+evaluated first and rejected: its own README carries a maintainer deprecation notice ("no longer
+the core focus"), it's frozen at a ~1-year-stale release, and its MCP client supports only
+`stdio`/legacy `sse` transports with no auth-header support at all — it cannot reach
+`app.keeperhub.com/mcp`'s streamable-HTTP endpoint unmodified. ElizaOS has none of these problems
+(same-day commits, genuine `streamable-http` + Bearer-header support, and is a KeeperHub-listed
+partner) and is what `eliza-agent/` actually uses.
 
 **Confirmed NOT deployed on Sepolia** (live `execute_protocol_action` calls, each returning a
 real `400` naming the specific missing contract): Ethena (`usde`/`ena`/`sUsde`), Curve

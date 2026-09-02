@@ -3,6 +3,9 @@
 /orchestrator/dist
 /ui/node_modules
 /ui/.next
+/eliza-agent/node_modules
+/eliza-agent/.eliza
+/eliza-agent/.elizadb
 .env
 .env.local
 *.log

@@ -1,0 +1,15 @@
+{
+  "name": "migratex-eliza-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun --env-file=.env src/index.ts"
+  },
+  "dependencies": {
+    "@elizaos/core": "1.7.2",
+    "@elizaos/plugin-bootstrap": "1.7.2",
+    "@elizaos/plugin-ollama": "1.2.4",
+    "@elizaos/plugin-sql": "1.7.2"
+  }
+}
