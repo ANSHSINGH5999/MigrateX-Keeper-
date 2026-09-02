@@ -61,14 +61,14 @@ function node(wf: KeeperHubWorkflow, id: string): WorkflowNode {
   return n!;
 }
 
-test("6-node linear graph: trigger -> withdraw -> verify -> approve -> supply -> verify", () => {
+test("7-node linear graph: trigger -> withdraw -> verify -> approve -> supply -> verify -> notify", () => {
   const wf = buildMigrationWorkflow(aaveV3Plan);
-  assert.equal(wf.nodes.length, 6);
+  assert.equal(wf.nodes.length, 7);
   assert.deepEqual(
     wf.nodes.map((n) => n.id),
-    ["trigger-1", "withdraw-source", "verify-withdraw", "approve-aave", "supply-target", "verify-supply"]
+    ["trigger-1", "withdraw-source", "verify-withdraw", "approve-aave", "supply-target", "verify-supply", "notify-telegram"]
   );
-  assert.equal(wf.edges.length, 5);
+  assert.equal(wf.edges.length, 6);
   assert.deepEqual(
     wf.edges.map((e) => [e.source, e.target]),
     [
@@ -77,6 +77,7 @@ test("6-node linear graph: trigger -> withdraw -> verify -> approve -> supply ->
       ["verify-withdraw", "approve-aave"],
       ["approve-aave", "supply-target"],
       ["supply-target", "verify-supply"],
+      ["verify-supply", "notify-telegram"],
     ]
   );
 });
@@ -87,6 +88,14 @@ test("approve-aave node uses web3/approve-token with unlimited allowance to the 
   assert.equal(approve.data.config.actionType, "web3/approve-token");
   assert.equal(approve.data.config.spenderAddress, "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951");
   assert.equal(approve.data.config.amount, "max");
+});
+
+test("notify-telegram sends the real final balance via a template ref, not a static string", () => {
+  const wf = buildMigrationWorkflow(aaveV3Plan);
+  const notify = node(wf, "notify-telegram");
+  assert.equal(notify.data.config.actionType, "telegram/send-message");
+  assert.match(notify.data.config.message as string, /\{\{@verify-supply:Balance\.balance\.balance\}\}/);
+  assert.ok(notify.data.config.chatId, "expected a chatId field");
 });
 
 test("throws for any non-aave-v3 pair -- morpho support was removed entirely", () => {

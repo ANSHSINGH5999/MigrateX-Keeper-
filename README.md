@@ -97,7 +97,7 @@ confirmed `valid: true` via `validate_workflow(deepCheck: true)` — zero errors
 
 | Kind | Workflow ID | Nodes | What it does |
 |---|---|---|---|
-| `basic` | [`umty7wmwpsak9cztndvt3`](https://app.keeperhub.com) | 6 | Manual trigger. Withdraw → verify → approve → supply → verify, within Aave V3 Sepolia. **Executed live** — see [Verified execution](#verified-execution) below. |
+| `basic` | [`761w5fdmavbfmb72kir4h`](https://app.keeperhub.com) | 7 | Manual trigger. Withdraw → verify → approve → supply → verify → notify (Telegram), within Aave V3 Sepolia. Withdraw-through-verify **executed live** — see [Verified execution](#verified-execution) below; the Telegram leg is new and needs your own chat id + integration (see the graph note below). |
 | `scheduled` | `6mfi90pptg2qtv5crmmf1` | 6 | Every 6h (`0 */6 * * *`), reads the live Aave V3 supply APY (`aave-v3/get-user-reserve-data.liquidityRate`, in ray units); if it's below 3%, withdraws and re-supplies 0.005 WETH, then logs the final balance either way. |
 | `guardian` | `awiys098yh7v2b9i5f8m1` | 5 | Hourly poll of the aWETH balance; if it drops below 0.004 (possible liquidation or an out-of-band withdrawal), runs a full Aave V3 health check and verifies the remaining gas balance. |
 | `advanced` | `ma6epf75fjdsonscq8roc` | 11 | Flagship. Pre-flight position check → balance gate → withdraw → receipt gate → supply → final verify, with dedicated `abort-log` and `alert-hold` off-ramps if either verification gate fails. |
@@ -128,7 +128,16 @@ trigger-1 (manual)
       -> approve-aave   (web3/approve-token, amount "max")
         -> supply-target (aave-v3/supply)
           -> verify-supply (web3/check-token-balance)
+            -> notify-telegram (telegram/send-message)
 ```
+
+`notify-telegram` posts the final aWETH balance after every real migration, via a template
+reference to `verify-supply`'s live output — not a static string. Its `chatId` in
+`orchestrator/src/workflow-builder.ts` is a placeholder (`@your_telegram_chat`): replace it with
+a real chat/channel id, and add a Telegram integration in your KeeperHub account settings, before
+this leg can actually send. Confirmed live: this account currently has no messaging integration
+configured at all (only the wallet) — the node itself is real and schema-verified; the
+destination is the part only you can supply.
 
 `approve-aave` exists because `aave-v3/supply` calls `Pool.supply()`, which needs an ERC20
 `transferFrom` — without a standing allowance to the Pool it reverts with an opaque `Error(32)`
