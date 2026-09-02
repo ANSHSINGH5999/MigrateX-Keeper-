@@ -26,6 +26,17 @@ import {
   buildEmergencyDebtClearWorkflow,
   buildLeverageLoopWorkflow,
   buildDeleverageWorkflow,
+  buildChainlinkPriceMonitorWorkflow,
+  buildOracleCrossCheckWorkflow,
+  buildCanonicalWethBalanceCheckWorkflow,
+  buildLidoPositionCheckWorkflow,
+  buildUniswapLpPositionCountWorkflow,
+  buildMorphoAuthorizationCheckWorkflow,
+  buildPositionValueAggregatorWorkflow,
+  buildDiscordHealthAlertWorkflow,
+  buildSlackHealthAlertWorkflow,
+  buildTelegramHealthAlertWorkflow,
+  buildEmailHealthAlertWorkflow,
 } from "./workflow-builder.js";
 import type { KeeperHubWorkflow, MigrationPlan, WorkflowNode } from "./types.js";
 
@@ -268,4 +279,77 @@ test("deleverage repays the LIVE debt balance (not a guessed amount) before with
   const repayIdx = wf.edges.findIndex((e) => e.target === "repay-debt");
   const withdrawIdx = wf.edges.findIndex((e) => e.target === "withdraw-extra");
   assert.ok(repayIdx < withdrawIdx, "repay-debt must be reached before withdraw-extra");
+});
+
+/* ------------------------------------------------------------------------
+ * 11 multi-protocol integration workflows -- every action type below was
+ * live-tested against Sepolia before use (see workflow-builder.ts's
+ * comment above buildChainlinkPriceMonitorWorkflow for the full account).
+ * These tests check structure and exact action types only; they can't
+ * verify live network behavior -- that was done once, by hand, against
+ * the real KeeperHub server, not on every test run.
+ * ------------------------------------------------------------------------ */
+const integrationCfg = { network: "11155111", user: `0x${"55".repeat(20)}` };
+const INTEGRATION_BUILDERS: Record<string, (cfg: typeof integrationCfg) => KeeperHubWorkflow> = {
+  "chainlink-eth-price-monitor": buildChainlinkPriceMonitorWorkflow,
+  "oracle-cross-check": buildOracleCrossCheckWorkflow,
+  "canonical-weth-balance-check": buildCanonicalWethBalanceCheckWorkflow,
+  "lido-position-check": buildLidoPositionCheckWorkflow,
+  "uniswap-lp-position-count": buildUniswapLpPositionCountWorkflow,
+  "morpho-authorization-check": buildMorphoAuthorizationCheckWorkflow,
+  "position-value-aggregator": buildPositionValueAggregatorWorkflow,
+  "discord-health-alert": buildDiscordHealthAlertWorkflow,
+  "slack-health-alert": buildSlackHealthAlertWorkflow,
+  "telegram-health-alert": buildTelegramHealthAlertWorkflow,
+  "email-health-alert": buildEmailHealthAlertWorkflow,
+};
+
+test(`all 11 integration workflows build a structurally consistent graph (${Object.keys(INTEGRATION_BUILDERS).length} checked)`, () => {
+  assert.equal(Object.keys(INTEGRATION_BUILDERS).length, 11);
+  for (const [name, build] of Object.entries(INTEGRATION_BUILDERS)) {
+    const wf = build(integrationCfg);
+    const triggers = wf.nodes.filter((n) => n.type === "trigger");
+    assert.equal(triggers.length, 1, `${name}: expected exactly one trigger node`);
+    const ids = new Set(wf.nodes.map((n) => n.id));
+    assert.equal(ids.size, wf.nodes.length, `${name}: duplicate node id`);
+    for (const e of wf.edges) {
+      assert.ok(ids.has(e.source), `${name}: edge source '${e.source}' has no matching node`);
+      assert.ok(ids.has(e.target), `${name}: edge target '${e.target}' has no matching node`);
+    }
+    for (const n of wf.nodes) {
+      const key = n.type === "trigger" ? "triggerType" : "actionType";
+      assert.ok(n.data.config[key], `${name}: node '${n.id}' (${n.type}) missing '${key}'`);
+    }
+  }
+});
+
+test("none of the 11 integration workflows use code/run-code, webhook/send-webhook, or any blockscout/* action -- all three are KeeperHub Pro-plan-gated, confirmed live via a real 402 on this free-tier account", () => {
+  const gated = /^(code\/run-code|webhook\/send-webhook|blockscout\/)/;
+  for (const [name, build] of Object.entries(INTEGRATION_BUILDERS)) {
+    for (const n of build(integrationCfg).nodes) {
+      const actionType = n.data.config.actionType as string | undefined;
+      if (actionType) assert.doesNotMatch(actionType, gated, `${name}: node '${n.id}' uses a paid-plan-gated action`);
+    }
+  }
+});
+
+test("oracle-cross-check reads ETH/USD from two independently deployed Sepolia oracles (Chainlink and Chronicle)", () => {
+  const wf = buildOracleCrossCheckWorkflow(integrationCfg);
+  const actionTypes = wf.nodes.filter((n) => n.type === "action").map((n) => n.data.config.actionType);
+  assert.deepEqual(actionTypes, ["chainlink/eth-usd-latest-round-data", "chronicle/eth-usd-read"]);
+});
+
+test("canonical-weth-balance-check targets Sepolia's canonical WETH9, not the Aave reserve WETH this project's position lives in", () => {
+  const wf = buildCanonicalWethBalanceCheckWorkflow(integrationCfg);
+  const check = node(wf, "check-canonical-weth");
+  assert.equal(check.data.config.actionType, "wrapped/balance-of");
+});
+
+test("the 4 messaging workflows (discord/slack/telegram/email) each read account health first, then send it", () => {
+  for (const build of [buildDiscordHealthAlertWorkflow, buildSlackHealthAlertWorkflow, buildTelegramHealthAlertWorkflow, buildEmailHealthAlertWorkflow]) {
+    const wf = build(integrationCfg);
+    assert.equal(wf.nodes[0]!.data.config.triggerType, "Manual");
+    assert.equal(wf.nodes[1]!.data.config.actionType, "aave-v3/get-user-account-data");
+    assert.match(wf.nodes[2]!.data.config.actionType as string, /\/send-(message|email)$/);
+  }
 });

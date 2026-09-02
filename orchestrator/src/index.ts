@@ -49,6 +49,7 @@ interface WorkflowRegistry {
   emergency: string;
   features: Record<string, string>;
   leverage: Record<string, string>;
+  integrations: Record<string, string>;
   organization?: { projectId: string; projectName: string; tags: Record<string, string> };
 }
 
@@ -75,16 +76,17 @@ function loadWorkflowId(kind: Exclude<WorkflowKind, "basic">): string {
 }
 
 /**
- * The 20 feature workflows and 2 leverage-pair workflows live under
- * workflows.json's `features`/`leverage` maps respectively, addressed by
+ * The 20 feature workflows, 2 leverage-pair workflows, and 11
+ * multi-protocol integration workflows live under workflows.json's
+ * `features`/`leverage`/`integrations` maps respectively, addressed by
  * --feature <name> instead of --workflow (checked in that order, so a
  * name collision would silently prefer `features` -- there isn't one).
  */
 function loadFeatureId(name: string): string {
   const registry = loadRegistry();
-  const id = registry.features[name] ?? registry.leverage[name];
+  const id = registry.features[name] ?? registry.leverage[name] ?? registry.integrations[name];
   if (!id) {
-    const known = [...Object.keys(registry.features), ...Object.keys(registry.leverage)];
+    const known = [...Object.keys(registry.features), ...Object.keys(registry.leverage), ...Object.keys(registry.integrations)];
     throw new Error(`No feature id for '${name}' in workflows.json. Known: ${known.join(", ")}`);
   }
   return id;

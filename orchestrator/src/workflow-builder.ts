@@ -943,3 +943,186 @@ export function buildDeleverageWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
     edges,
   };
 }
+
+/* ------------------------------------------------------------------------
+ * MULTI-PROTOCOL INTEGRATIONS -- 11 more workflows spanning oracles
+ * (Chainlink, Chronicle), other lending/DeFi protocols (Lido, Uniswap V3,
+ * Morpho), a compute primitive (Math), and notifications (Discord, Slack,
+ * Telegram, Email).
+ *
+ * Every protocol/action pair below was LIVE-TESTED against Sepolia before
+ * being used here, the same way Aave V4 and Morpho markets were tested
+ * and ruled out earlier in this project -- registry presence in
+ * list_action_schemas does NOT mean a chain actually has that protocol
+ * deployed. Confirmed working live: chainlink (price feeds), chronicle
+ * (price feeds), wrapped (canonical WETH9), lido (stETH/wstETH),
+ * uniswap-v3 (position NFT balance), morpho (is-authorized -- the core
+ * contract exists even though no usable market does, per the earlier
+ * investigation). Confirmed NOT deployed on Sepolia via real 400 errors
+ * naming the missing contract: aave-v4, aerodrome, ajna, cowswap, curve,
+ * ethena, frax-ether-v2, pendle, rocket-pool, sky, spark.
+ *
+ * `code/run-code`, `webhook/send-webhook`, and every `blockscout/*` action
+ * were also tried here first -- all three are real KeeperHub features,
+ * but `create_workflow` rejected all three live with a genuine 402
+ * "requires a paid plan" (this account is on KeeperHub's free tier), so
+ * the workflows below were redesigned to not depend on them (see the
+ * comments on `chainlink-eth-price-monitor` and `oracle-cross-check`).
+ * See the "Discovered but out of scope" README section for the full list
+ * with each item's specific reason.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * WORKFLOW -- Chainlink ETH Price Monitor: real Sepolia price feed, hourly.
+ * Originally piped the raw answer through a `code/run-code` node to format
+ * it to USD -- `create_workflow` rejected that live with a real 402
+ * "This workflow uses features that require a paid plan" naming
+ * `code/run-code` specifically (this KeeperHub account is on the free
+ * tier). Kept as a plain oracle read rather than force a paid feature in;
+ * `answer` is already a real, live, verified value (confirmed via a
+ * direct execute_protocol_action call before this was ever built as a
+ * workflow) even unformatted.
+ */
+export function buildChainlinkPriceMonitorWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const nodes: WorkflowNode[] = [
+    scheduleTriggerNode("0 * * * *", "UTC"),
+    actionNode("get-price", 200, { actionType: "chainlink/eth-usd-latest-round-data", network: cfg.network }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "get-price")];
+  return { name: "chainlink-eth-price-monitor", description: "Hourly: read the real Chainlink ETH/USD Sepolia price feed.", nodes, edges };
+}
+
+/**
+ * WORKFLOW -- Oracle Cross-Check: reads the SAME ETH/USD price from two
+ * independent, live-verified Sepolia oracles (Chainlink and Chronicle)
+ * side by side. Originally computed the percentage difference between
+ * them via a `code/run-code` node -- same 402 paid-plan rejection as
+ * above, so the comparison itself is left to whoever reads the two
+ * outputs rather than a Code node; the real value here is that BOTH
+ * numbers come from independently deployed Sepolia oracle contracts.
+ */
+export function buildOracleCrossCheckWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("chainlink-price", 200, { actionType: "chainlink/eth-usd-latest-round-data", network: cfg.network }),
+    actionNode("chronicle-price", 400, { actionType: "chronicle/eth-usd-read", network: cfg.network }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "chainlink-price"), edge("chainlink-price", "chronicle-price")];
+  return { name: "oracle-cross-check", description: "Manual: reads ETH/USD from both Chainlink and Chronicle -- two independently deployed Sepolia price oracles -- side by side.", nodes, edges };
+}
+
+/** WORKFLOW -- Canonical WETH Balance Check: KeeperHub's generic `wrapped/*` actions target Sepolia's canonical WETH9 (0xfFf997...), a DIFFERENT contract from the Aave reserve WETH (0xC558DB...) this whole project runs on. Confirmed live: this wallet's balance there is 0, since every wrap this project has done went through the Aave reserve token directly. */
+export function buildCanonicalWethBalanceCheckWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("check-canonical-weth", 200, { actionType: "wrapped/balance-of", network: cfg.network, account: cfg.user }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "check-canonical-weth")];
+  return { name: "canonical-weth-balance-check", description: "Manual: checks the balance on Sepolia's CANONICAL WETH9 contract -- a different, separate contract from the Aave reserve WETH this project's position lives in. Documents the 'no single WETH' lesson from a second angle.", nodes, edges };
+}
+
+/** WORKFLOW -- Lido Position Check: stETH and wstETH are real, deployed contracts on Sepolia (confirmed live), independent of this project's Aave position. */
+export function buildLidoPositionCheckWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("steth-balance", 200, { actionType: "lido/get-steth-balance", network: cfg.network, account: cfg.user }),
+    actionNode("wsteth-balance", 400, { actionType: "lido/get-wsteth-balance", network: cfg.network, account: cfg.user }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "steth-balance"), edge("steth-balance", "wsteth-balance")];
+  return { name: "lido-position-check", description: "Manual: checks stETH and wstETH balances on Sepolia's real, live Lido deployment.", nodes, edges };
+}
+
+/** WORKFLOW -- Uniswap V3 LP Position Count: the position-NFT manager is deployed on Sepolia; balance-of counts how many LP position NFTs this wallet owns (0, since this project has never opened one). */
+export function buildUniswapLpPositionCountWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("lp-count", 200, { actionType: "uniswap/balance-of", network: cfg.network, owner: cfg.user }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "lp-count")];
+  return { name: "uniswap-lp-position-count", description: "Manual: counts how many Uniswap V3 LP position NFTs this wallet owns on Sepolia.", nodes, edges };
+}
+
+/** WORKFLOW -- Morpho Authorization Check: the Morpho Blue core contract IS deployed on Sepolia (confirmed live) even though the one market this project investigated earlier was never usable -- this checks the separate on-chain authorization system, not a market position. */
+export function buildMorphoAuthorizationCheckWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("check-auth", 200, { actionType: "morpho/is-authorized", network: cfg.network, authorizer: cfg.user, authorized: cfg.user }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "check-auth")];
+  return { name: "morpho-authorization-check", description: "Manual: checks this wallet's Morpho Blue on-chain authorization status -- the core Morpho contract is real and deployed on Sepolia, independent of whether any market on it is usable.", nodes, edges };
+}
+
+/** WORKFLOW -- Position Value Aggregator: combines two real balance reads with a Math node instead of manual addition. */
+export function buildPositionValueAggregatorWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("weth-balance", 200, { actionType: "web3/check-token-balance", network: cfg.network, address: cfg.user, tokenConfig: tokenConfig(cfg.network, "WETH") }),
+    actionNode("aweth-balance", 400, { actionType: "web3/check-token-balance", network: cfg.network, address: cfg.user, tokenConfig: tokenConfig(cfg.network, "aWETH") }),
+    actionNode("total-value", 600, {
+      actionType: "math/aggregate",
+      operation: "sum",
+      inputMode: "explicit",
+      explicitValues: "{{@weth-balance:Balance.balance.balanceRaw}}\n{{@aweth-balance:Balance.balance.balanceRaw}}",
+    }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "weth-balance"), edge("weth-balance", "aweth-balance"), edge("aweth-balance", "total-value")];
+  return { name: "position-value-aggregator", description: "Manual: reads WETH (idle) and aWETH (supplied) balances, then sums them via a Math node into one total WETH-denominated position value.", nodes, edges };
+}
+
+/** Shared health-check preface for the 4 messaging workflows below -- none of these are executed: this KeeperHub account has no Discord/Slack/Telegram/SendGrid integration configured (confirmed via a live list_integrations call, which shows only the wallet integration), so a real send would fail even though the workflow itself is structurally valid. */
+function messagingCfg(cfg: MonitorConfig) {
+  return { network: cfg.network, user: cfg.user };
+}
+
+/** WORKFLOW -- Discord Health Alert (structural only; needs a Discord integration configured in your KeeperHub account). */
+export function buildDiscordHealthAlertWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const c = messagingCfg(cfg);
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("account-data", 200, { actionType: "aave-v3/get-user-account-data", network: c.network, user: c.user }),
+    actionNode("send-discord", 400, { actionType: "discord/send-message", discordMessage: "MigrateX health factor: {{@account-data:AccountData.healthFactor}}" }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "account-data"), edge("account-data", "send-discord")];
+  return { name: "discord-health-alert", description: "Manual: posts the current Aave V3 health factor to Discord. Needs a Discord integration configured in your KeeperHub account to actually send.", nodes, edges };
+}
+
+/** WORKFLOW -- Slack Health Alert (structural only; needs a Slack integration configured in your KeeperHub account). */
+export function buildSlackHealthAlertWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const c = messagingCfg(cfg);
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("account-data", 200, { actionType: "aave-v3/get-user-account-data", network: c.network, user: c.user }),
+    actionNode("send-slack", 400, { actionType: "slack/send-message", slackChannel: "#migratex-alerts", slackMessage: "MigrateX health factor: {{@account-data:AccountData.healthFactor}}" }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "account-data"), edge("account-data", "send-slack")];
+  return { name: "slack-health-alert", description: "Manual: posts the current Aave V3 health factor to Slack. Needs a Slack integration configured in your KeeperHub account to actually send.", nodes, edges };
+}
+
+/** WORKFLOW -- Telegram Health Alert (structural only; needs a Telegram integration configured in your KeeperHub account). */
+export function buildTelegramHealthAlertWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const c = messagingCfg(cfg);
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("account-data", 200, { actionType: "aave-v3/get-user-account-data", network: c.network, user: c.user }),
+    actionNode("send-telegram", 400, { actionType: "telegram/send-message", chatId: "@migratex_alerts", message: "MigrateX health factor: {{@account-data:AccountData.healthFactor}}" }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "account-data"), edge("account-data", "send-telegram")];
+  return { name: "telegram-health-alert", description: "Manual: posts the current Aave V3 health factor to Telegram. Needs a Telegram integration configured in your KeeperHub account to actually send.", nodes, edges };
+}
+
+/** WORKFLOW -- Email Health Alert via SendGrid (structural only; needs a SendGrid integration configured in your KeeperHub account). */
+export function buildEmailHealthAlertWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const c = messagingCfg(cfg);
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("account-data", 200, { actionType: "aave-v3/get-user-account-data", network: c.network, user: c.user }),
+    actionNode("send-email", 400, {
+      actionType: "sendgrid/send-email",
+      emailTo: "alerts@example.com",
+      emailSubject: "MigrateX health alert",
+      emailBody: "MigrateX health factor: {{@account-data:AccountData.healthFactor}}",
+    }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "account-data"), edge("account-data", "send-email")];
+  return { name: "email-health-alert", description: "Manual: emails the current Aave V3 health factor via SendGrid. Needs a SendGrid integration configured in your KeeperHub account to actually send.", nodes, edges };
+}

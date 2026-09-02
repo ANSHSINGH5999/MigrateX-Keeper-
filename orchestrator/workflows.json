@@ -30,13 +30,27 @@
     "leverage-loop": "nnrafy0bhpygnvxv664o8",
     "deleverage": "pe1p8yhcd0mc8fymdxsoi"
   },
+  "integrations": {
+    "chainlink-eth-price-monitor": "g4nr0jtju3d94g6vo1fuo",
+    "oracle-cross-check": "vyt2zfk6xt3uer2up29b4",
+    "canonical-weth-balance-check": "ooxo7v2tir32bw41hft3m",
+    "lido-position-check": "wvkvcivwt0597mgskqxf4",
+    "uniswap-lp-position-count": "7xvmhz409r2olsz4umbaf",
+    "morpho-authorization-check": "qqixz7bj8a9ie9ot951x9",
+    "position-value-aggregator": "oaqdrgeika9flc8fkvsj2",
+    "discord-health-alert": "wyc00nk8up0ezwbeib2yk",
+    "slack-health-alert": "m0wb9cbbwwb7ocrusf5pm",
+    "telegram-health-alert": "a9qrwkwvm8ha7awp4vmg1",
+    "email-health-alert": "zvd7h5ij7rqwr30jt4rit"
+  },
   "organization": {
     "projectId": "gzwk0kvj8143jlb7bzkv9",
     "projectName": "MigrateX",
     "tags": {
       "core": "8kp2504da95763hddoqb6",
       "feature": "gxzr3zmaiuv2rs0z2b8ty",
-      "leverage": "heqyl0t1jonbesdfr8b8s"
+      "leverage": "heqyl0t1jonbesdfr8b8s",
+      "integration": "ucbi21xx7eo23de86xzgb"
     }
   }
 }

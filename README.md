@@ -38,6 +38,7 @@ for two cases where the obvious field name was wrong.
 - [Unhappy paths handled](#unhappy-paths-handled)
 - [20 additional feature workflows](#20-additional-feature-workflows)
 - [Leverage pair](#leverage-pair)
+- [11 multi-protocol integrations](#11-multi-protocol-integrations)
 - [Real KeeperHub project organization](#real-keeperhub-project-organization)
 - [Discovered but out of scope](#discovered-but-out-of-scope)
 - [Tech stack](#tech-stack)
@@ -324,44 +325,107 @@ funded Sepolia reserve this project has verified live — that's an honest descr
 demonstrated (the looping mechanism), not a claim this is a profitable production strategy;
 borrowing the same asset you supplied has no yield differential.
 
+## 11 multi-protocol integrations
+
+KeeperHub's plugin catalog spans ~27 protocols plus messaging and system actions. Rather than
+assume any of them work on Sepolia, every candidate below was **live-tested first** — the exact
+discipline that ruled out Aave V4 and Morpho markets earlier, just run systematically across the
+whole catalog. The result: most mainnet-native protocols (Ethena, Curve, Sky, Spark, Rocket Pool,
+Frax Ether V2, Aerodrome, Ajna, Pendle, CoW Swap) returned a real, explicit error —
+`"Protocol \"X\" contract \"Y\" is not deployed on chain 11155111"` — not deployed on this
+testnet at all. A second real constraint surfaced independently: `code/run-code`,
+`webhook/send-webhook`, and every `blockscout/*` action are **KeeperHub Pro-plan-gated** —
+`create_workflow` rejected all three live with a genuine `402 Payment Required` on this free-tier
+account. Two workflows (`chainlink-eth-price-monitor`, `oracle-cross-check`) were redesigned
+around that after hitting it firsthand.
+
+What's left is 11 workflows across protocols confirmed genuinely live on Sepolia, all created via
+`create_workflow` and `validate_workflow(deepCheck: true)`-passing; the 7 pure reads were also
+**actually executed** (not just validated) for full proof, all 100% success:
+
+| Workflow | Protocol | Executed? | What it does |
+|---|---|---|---|
+| `chainlink-eth-price-monitor` | Chainlink | ✅ | Hourly: reads the real Chainlink ETH/USD Sepolia price feed. |
+| `oracle-cross-check` | Chainlink + Chronicle | ✅ | Reads ETH/USD from two independently deployed Sepolia oracles side by side. |
+| `canonical-weth-balance-check` | Wrapped | ✅ | Checks Sepolia's canonical WETH9 — a different contract from the Aave reserve WETH this whole project runs on. |
+| `lido-position-check` | Lido | ✅ | Checks stETH and wstETH balances on Sepolia's real Lido deployment. |
+| `uniswap-lp-position-count` | Uniswap V3 | ✅ | Counts this wallet's Uniswap V3 LP position NFTs on Sepolia. |
+| `morpho-authorization-check` | Morpho | ✅ | Checks on-chain authorization status — the core Morpho Blue contract is real on Sepolia even though no usable market is (see the [architecture](#architecture) note). |
+| `position-value-aggregator` | Math | ✅ | Sums WETH + aWETH balances via a `math/aggregate` node. |
+| `discord-health-alert` | Discord | structural | Posts the account health factor to Discord. |
+| `slack-health-alert` | Slack | structural | Posts the account health factor to Slack. |
+| `telegram-health-alert` | Telegram | structural | Posts the account health factor to Telegram. |
+| `email-health-alert` | Email (SendGrid) | structural | Emails the account health factor. |
+
+The 4 messaging workflows are real and `valid: true`, but not executed: this KeeperHub account
+has no Discord/Slack/Telegram/SendGrid integration configured (confirmed via a live
+`list_integrations` call, which shows only the wallet integration) — a real send would fail even
+though the workflow itself is structurally correct. Configure the matching integration in your
+KeeperHub account settings to activate them.
+
+```bash
+node dist/index.js --feature oracle-cross-check --execute
+node dist/index.js --feature discord-health-alert   # dry-run only, no --execute -- needs your Discord integration first
+```
+
 ## Real KeeperHub project organization
 
-All 27 workflows above are grouped under a real KeeperHub project, created and verified live via
-`create_project` / `create_tag` / `update_workflow` — not just a naming convention in this repo:
+All 38 workflows above (5 core + 20 features + 2 leverage + 11 integrations) are grouped under a
+real KeeperHub project, created and verified live via `create_project` / `create_tag` /
+`update_workflow` — not just a naming convention in this repo:
 
-- **Project:** `MigrateX` (`gzwk0kvj8143jlb7bzkv9`) — `list_projects` confirms `workflowCount: 27`.
-- **Tags:** `core` (the 5 main workflows), `feature` (the 20 read/monitor/action workflows),
-  `leverage` (the 2 compound leverage workflows).
+- **Project:** `MigrateX` (`gzwk0kvj8143jlb7bzkv9`) — `list_projects` confirms `workflowCount: 38`.
+- **Tags:** `core` (5), `feature` (20), `leverage` (2), `integration` (11).
 
 ## Discovered but out of scope
 
-Two more real KeeperHub capabilities were found and schema-verified while building this, but
-deliberately not wired in:
+Real KeeperHub capabilities that were found and tested while building this, but deliberately not
+built into a full feature — with the specific, tested reason for each:
 
-- **`tempo_sign_and_hold` / `tempo_release_hold` / `tempo_cancel_hold`** — a genuine hold-then-release
-  payment primitive (sign a transfer now, broadcast it later on release or cancel). It targets
-  **Tempo Testnet** (chain ID `42431`, confirmed real and `stable` in KeeperHub's chain list) —
-  a different chain than the Sepolia/Aave position this project is funded on. Demonstrating it
-  for real would need a separately funded Tempo testnet wallet, which this project doesn't have;
-  building it without a live broadcast would break this repo's own "verify on-chain, don't just
-  claim it" standard.
+**Confirmed NOT deployed on Sepolia** (live `execute_protocol_action` calls, each returning a
+real `400` naming the specific missing contract): Ethena (`usde`/`ena`/`sUsde`), Curve
+(`crvToken`), Sky (`dai`/`usds`/`sky`/`sUsds`), Spark (`pool`/`sdai`), Rocket Pool (`reth`),
+Frax Ether V2 (`minter`), Aerodrome (`poolFactory`/`voter`), Ajna (`vault1`), Pendle
+(`vePendle`), CoW Swap (`settlement`), Aave V4 (`lidoSpoke`, mainnet-only — established earlier
+in this project).
+
+**Confirmed Pro-plan-gated** (live `create_workflow` calls, each returning a real `402 Payment
+Required` naming the feature): `code/run-code`, `webhook/send-webhook`, every `blockscout/*`
+action.
+
+**Not attempted, with reason:**
+- **Safe** — every read action needs a real deployed Safe multisig `contractAddress`; this
+  project doesn't have one.
+- **Superfluid** — every action needs a specific SuperToken address; none is known to exist for
+  this project's WETH on Sepolia.
+- **Hyperliquid** — its actions take no `network`/chain-id field at all; it's an off-chain
+  perpetuals exchange API, unrelated to the Sepolia position this project manages.
+- **Robinhood** — `robinhood/get-stock-price` returned "Direct execution not supported... use
+  workflow execution instead," the same shape as `web3/approve-token` earlier; deprioritized
+  since tokenized stock trading is outside this project's actual domain (Aave lending).
+- **`tempo_sign_and_hold` / `tempo_release_hold` / `tempo_cancel_hold`** — a genuine
+  hold-then-release payment primitive, but it targets **Tempo Testnet** (chain ID `42431`,
+  confirmed real and `stable` in KeeperHub's chain list) — a different chain than the Sepolia
+  position this project is funded on. Demonstrating it for real would need a separately funded
+  Tempo testnet wallet.
 - **`call_workflow`** — lets one workflow invoke another, but only by its public marketplace
   `listedSlug` (via `list_workflow`), meaning composition this way requires publishing a workflow
-  publicly on KeeperHub first. That's a real, distinct action from anything else in this repo and
-  wasn't taken without asking.
+  publicly on KeeperHub first — a real, distinct action from anything else in this repo, not
+  taken without asking.
 
 ## Status
 
 - [x] Rust policy core (`p-token-migrator --output-plan`) with pair/address/amount validation
       and unit tests.
-- [x] TypeScript workflow builder producing all 5 core graphs, 20 feature workflows, and the
-      leverage pair, from real, schema-verified node configs.
+- [x] TypeScript workflow builder producing all 5 core graphs, 20 feature workflows, the
+      leverage pair, and 11 multi-protocol integrations, from real, schema-verified node configs.
 - [x] KeeperHub MCP client, dry-run flow, audit polling, all exercised against the live
       production MCP server.
-- [x] All 27 workflows created and `validate_workflow(deepCheck: true)`-passing on KeeperHub,
-      organized under a real KeeperHub project + tags.
-- [x] Real Sepolia execution of the `basic` and `emergency` workflows, independently verified
-      on-chain (see [Verified execution](#verified-execution)).
+- [x] All 38 workflows created and `validate_workflow(deepCheck: true)`-passing on KeeperHub,
+      organized under a real KeeperHub project + 4 tags.
+- [x] Real Sepolia execution of the `basic`, `emergency` workflows and all 7 read-only
+      integration workflows, independently verified on-chain / by execution status (see
+      [Verified execution](#verified-execution)).
 - [x] `ui/` Next.js app — real Server Actions, no mocked data.
 - [ ] Demo video, bounty PR (`web3/batch-token-check` using multicall3).
 
