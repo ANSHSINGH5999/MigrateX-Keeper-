@@ -19,6 +19,7 @@ interface Cli {
   rustBin?: string;
   execute: boolean;
   workflowKind: WorkflowKind;
+  feature?: string;
 }
 
 function parseArgs(argv: string[]): Cli {
@@ -28,6 +29,7 @@ function parseArgs(argv: string[]): Cli {
     if (arg === "--plan") cli.planFile = argv[++i];
     else if (arg === "--rust-bin") cli.rustBin = argv[++i];
     else if (arg === "--execute") cli.execute = true;
+    else if (arg === "--feature") cli.feature = argv[++i];
     else if (arg === "--workflow") {
       const kind = argv[++i] as WorkflowKind;
       if (!WORKFLOW_KINDS.includes(kind)) {
@@ -39,20 +41,39 @@ function parseArgs(argv: string[]): Cli {
   return cli;
 }
 
-/**
- * scheduled/guardian/advanced are pre-created, persistent automations
- * (built once via workflow-builder.ts and registered in workflows.json) --
- * unlike "basic" they don't come from a per-run MigrationPlan, so running
- * the CLI against them validates + optionally executes the SAME workflow
- * every time rather than creating a new one.
- */
-function loadWorkflowId(kind: Exclude<WorkflowKind, "basic">): string {
+interface WorkflowRegistry {
+  [kind: string]: string | Record<string, string>;
+  features: Record<string, string>;
+}
+
+function loadRegistry(): WorkflowRegistry {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const registryPath = path.join(here, "..", "workflows.json");
-  const registry = JSON.parse(readFileSync(registryPath, "utf8")) as Record<string, string>;
+  return JSON.parse(readFileSync(registryPath, "utf8")) as WorkflowRegistry;
+}
+
+/**
+ * scheduled/guardian/advanced/emergency are pre-created, persistent
+ * automations (built once via workflow-builder.ts and registered in
+ * workflows.json) -- unlike "basic" they don't come from a per-run
+ * MigrationPlan, so running the CLI against them validates + optionally
+ * executes the SAME workflow every time rather than creating a new one.
+ */
+function loadWorkflowId(kind: Exclude<WorkflowKind, "basic">): string {
+  const registry = loadRegistry();
   const id = registry[kind];
+  if (!id || typeof id !== "string") {
+    throw new Error(`No workflow id for '${kind}' in workflows.json`);
+  }
+  return id;
+}
+
+/** The 20 feature workflows live under workflows.json's `features` map, addressed by --feature <name> instead of --workflow. */
+function loadFeatureId(name: string): string {
+  const registry = loadRegistry();
+  const id = registry.features[name];
   if (!id) {
-    throw new Error(`No workflow id for '${kind}' in ${registryPath}`);
+    throw new Error(`No feature id for '${name}' in workflows.json's "features" map. Known: ${Object.keys(registry.features).join(", ")}`);
   }
   return id;
 }
@@ -83,11 +104,21 @@ async function main() {
     mcpUrl: process.env.KEEPERHUB_MCP_URL,
   });
 
-  console.log(`Workflow: ${cli.workflowKind}`);
-
   let workflowId: string;
 
-  if (cli.workflowKind === "basic") {
+  if (cli.feature) {
+    console.log(`Feature: ${cli.feature}`);
+    workflowId = loadFeatureId(cli.feature);
+    console.log(`Validating pre-created workflow ${workflowId} (deepCheck)...`);
+    const validation = await client.validateWorkflow(workflowId, { deepCheck: true });
+    console.log(JSON.stringify(validation, null, 2));
+    if (!validation.valid) {
+      console.error("Validation failed — refusing to execute. See errors above.");
+      process.exitCode = 1;
+      return;
+    }
+  } else if (cli.workflowKind === "basic") {
+    console.log(`Workflow: ${cli.workflowKind}`);
     const plan = loadPlan(cli);
     console.log(`Plan: migrate ${plan.amount} ${plan.token} ${plan.source_protocol} -> ${plan.target_protocol} (chain ${plan.network})`);
 
@@ -106,6 +137,7 @@ async function main() {
     }
     workflowId = report.workflowId;
   } else {
+    console.log(`Workflow: ${cli.workflowKind}`);
     workflowId = loadWorkflowId(cli.workflowKind);
     console.log(`Validating pre-created workflow ${workflowId} (deepCheck)...`);
     const validation = await client.validateWorkflow(workflowId, { deepCheck: true });

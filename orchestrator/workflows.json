@@ -3,5 +3,27 @@
   "scheduled": "6mfi90pptg2qtv5crmmf1",
   "guardian": "awiys098yh7v2b9i5f8m1",
   "advanced": "ma6epf75fjdsonscq8roc",
-  "emergency": "fbhmewqjmkiwlrwcsn1fi"
+  "emergency": "fbhmewqjmkiwlrwcsn1fi",
+  "features": {
+    "health-factor-monitor": "96nrppe68x3ri5j3q6eub",
+    "enable-collateral": "sihh84gf7eersxi6kldu5",
+    "disable-collateral": "64kbbnocgws7iykf17yqn",
+    "auto-repay-on-low-health": "hdc8okskxt9393vrhjrcp",
+    "borrow-against-collateral": "lmpmzwijkj2sb3rbnleby",
+    "debt-position-monitor": "frlqjn08ltr8gmkgjqkdz",
+    "webhook-rebalance-trigger": "w1d60vpdttjq54ww0oo30",
+    "block-interval-sync": "bscqr1eypvyirrqx5134c",
+    "event-triggered-supply-watch": "1m7ab9n2yykz02f0cyix0",
+    "allowance-auditor": "t5nbdft2vfza392ogzicb",
+    "multi-asset-balance-snapshot": "l3eqo2oz7mg5hfgs5s702",
+    "collateral-safety-check": "3gstmdlc31l5a6c5e1bjt",
+    "repay-full-debt": "nhjr7emppuqb8285oy8hf",
+    "borrow-then-track": "c9xtfq6puqpyyt7baqso1",
+    "position-health-dashboard-feed": "eu41yhx0dg1zzxmh7fyrt",
+    "pre-migration-safety-gate": "34hhi5j9lz734ec52ta3z",
+    "gas-buffer-guardian": "0ggu35izsbjhfcw26b7h3",
+    "full-position-report": "bz9jn7i1rf16cw49v6ao3",
+    "re-enable-collateral-after-repay": "cbzh3sik75oqijz1xk5j4",
+    "emergency-debt-clear": "hiqc7hzgolxtp7wbxmhm8"
+  }
 }

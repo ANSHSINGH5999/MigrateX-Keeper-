@@ -103,6 +103,49 @@ function edge(source: string, target: string, sourceHandle?: "true" | "false"): 
   return { id: `${source}-${target}${suffix}`, source, target, ...(sourceHandle ? { sourceHandle } : {}) };
 }
 
+function webhookTriggerNode(): WorkflowNode {
+  return {
+    id: "trigger-1",
+    type: "trigger",
+    position: { x: 0, y: 0 },
+    data: { type: "trigger", config: { triggerType: "Webhook" } },
+  };
+}
+
+/**
+ * Blockchain event trigger. `contractABI` is a required field even though
+ * the platform auto-fetches ABIs for verified contracts -- confirmed
+ * against the live list_action_schemas dump, so a real event fragment is
+ * supplied here rather than an empty string, to not depend on that
+ * auto-fetch behavior succeeding.
+ */
+function eventTriggerNode(network: string, contractAddress: string, eventName: string, abiFragment: Record<string, unknown>): WorkflowNode {
+  return {
+    id: "trigger-1",
+    type: "trigger",
+    position: { x: 0, y: 0 },
+    data: {
+      type: "trigger",
+      config: {
+        triggerType: "Event",
+        network,
+        contractAddress,
+        contractABI: JSON.stringify([abiFragment]),
+        eventName,
+      },
+    },
+  };
+}
+
+function blockTriggerNode(network: string, blockInterval: string): WorkflowNode {
+  return {
+    id: "trigger-1",
+    type: "trigger",
+    position: { x: 0, y: 0 },
+    data: { type: "trigger", config: { triggerType: "Block", network, blockInterval } },
+  };
+}
+
 /** Aave V3's Sepolia Pool -- `aave-v3/supply` calls `Pool.supply()`, which needs an ERC20 `transferFrom`, so the Pool needs an allowance on the source token first. */
 const AAVE_V3_SEPOLIA_POOL = "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951";
 
@@ -489,4 +532,345 @@ export function buildEmergencyExitWorkflow(cfg: MonitorConfig): KeeperHubWorkflo
     nodes,
     edges,
   };
+}
+
+/* ------------------------------------------------------------------------
+ * 20 FEATURE WORKFLOWS -- the full real Aave V3 action surface KeeperHub
+ * exposes (borrow/repay/set-collateral/get-user-account-data, on top of
+ * supply/withdraw already used above), combined with every real trigger
+ * type (Manual/Schedule/Webhook/Event/Block). Every field name below is
+ * confirmed against the live list_action_schemas dump, not guessed --
+ * aave-v3/borrow and aave-v3/repay both mark `interestRateMode` optional,
+ * but it's included explicitly on both here on the same precedent as
+ * aave-v3/supply's `referralCode`: a field an earlier, unrelated call
+ * needed despite being marked optional in the schema.
+ *
+ * These are created + validated live (create_workflow + validate_workflow
+ * deepCheck:true) but, unlike `basic` and `emergency`, are NOT executed as
+ * part of building them -- several would open real debt or move real
+ * funds, and doing that isn't implied by "add the feature." Execute any
+ * of them individually the same way `emergency` was: build, dry-run,
+ * --execute.
+ * ------------------------------------------------------------------------ */
+
+const SMALL_AMOUNT = "1000000000000000"; // 0.001 WETH -- a demo-scale borrow/repay amount, distinct from the 0.005 used for supply/withdraw elsewhere.
+
+/** Aave V3 Pool's real `Supply` event signature -- used by the event-triggered feature below. */
+const AAVE_SUPPLY_EVENT_ABI = {
+  anonymous: false,
+  name: "Supply",
+  type: "event",
+  inputs: [
+    { indexed: true, name: "reserve", type: "address" },
+    { indexed: false, name: "user", type: "address" },
+    { indexed: true, name: "onBehalfOf", type: "address" },
+    { indexed: false, name: "amount", type: "uint256" },
+    { indexed: true, name: "referralCode", type: "uint16" },
+  ],
+};
+
+/** 1. Health Factor Monitor -- hourly check of overall account health (not just one reserve). */
+export function buildHealthFactorMonitorWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const nodes: WorkflowNode[] = [
+    scheduleTriggerNode("0 * * * *", "UTC"),
+    actionNode("account-data", 200, { actionType: "aave-v3/get-user-account-data", network: cfg.network, user: cfg.user }),
+    conditionNode("health-check", 400, "{{@account-data:AccountData.healthFactor}} < 1500000000000000000"),
+    actionNode("log-warning", 600, { actionType: "web3/check-balance", network: cfg.network, address: cfg.user }),
+  ];
+  const edges: WorkflowEdge[] = [
+    edge("trigger-1", "account-data"),
+    edge("account-data", "health-check"),
+    edge("health-check", "log-warning", "true"),
+  ];
+  return { name: "health-factor-monitor", description: "Hourly: read overall Aave V3 account health factor; if below 1.5, log a warning state.", nodes, edges };
+}
+
+/** 2. Enable Collateral -- flip the WETH reserve to usable as collateral. */
+export function buildEnableCollateralWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const { address: weth } = tokenInfo(cfg.network, "WETH");
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("enable-collateral", 200, { actionType: "aave-v3/set-collateral", network: cfg.network, asset: weth, useAsCollateral: "true" }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "enable-collateral")];
+  return { name: "enable-collateral", description: "Manual: mark the WETH reserve as usable collateral.", nodes, edges };
+}
+
+/** 3. Disable Collateral -- flip the WETH reserve to NOT usable as collateral (keeps the supply position, stops it backing borrows). */
+export function buildDisableCollateralWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const { address: weth } = tokenInfo(cfg.network, "WETH");
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("disable-collateral", 200, { actionType: "aave-v3/set-collateral", network: cfg.network, asset: weth, useAsCollateral: "false" }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "disable-collateral")];
+  return { name: "disable-collateral", description: "Manual: mark the WETH reserve as NOT usable collateral, without withdrawing it.", nodes, edges };
+}
+
+/** 4. Auto-Repay on Low Health -- every 30min, repay a small amount of debt if health factor is dangerously low. */
+export function buildAutoRepayOnLowHealthWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const { address: weth } = tokenInfo(cfg.network, "WETH");
+  const nodes: WorkflowNode[] = [
+    scheduleTriggerNode("*/30 * * * *", "UTC"),
+    actionNode("account-data", 200, { actionType: "aave-v3/get-user-account-data", network: cfg.network, user: cfg.user }),
+    conditionNode("danger-check", 400, "{{@account-data:AccountData.healthFactor}} < 1200000000000000000"),
+    actionNode("emergency-repay", 600, {
+      actionType: "aave-v3/repay", network: cfg.network, asset: weth, amount: SMALL_AMOUNT, onBehalfOf: cfg.user, interestRateMode: "2",
+    }),
+  ];
+  const edges: WorkflowEdge[] = [
+    edge("trigger-1", "account-data"),
+    edge("account-data", "danger-check"),
+    edge("danger-check", "emergency-repay", "true"),
+  ];
+  return { name: "auto-repay-on-low-health", description: "Every 30min: if account health factor drops below 1.2, repay 0.001 WETH of debt.", nodes, edges };
+}
+
+/** 5. Borrow Against Collateral -- only borrows if the account actually has borrowing power available. */
+export function buildBorrowAgainstCollateralWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const { address: weth } = tokenInfo(cfg.network, "WETH");
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("account-data", 200, { actionType: "aave-v3/get-user-account-data", network: cfg.network, user: cfg.user }),
+    conditionNode("borrow-power-check", 400, "{{@account-data:AccountData.availableBorrowsBase}} > 0"),
+    actionNode("borrow", 600, {
+      actionType: "aave-v3/borrow", network: cfg.network, asset: weth, amount: SMALL_AMOUNT, onBehalfOf: cfg.user, interestRateMode: "2", referralCode: "0",
+    }),
+  ];
+  const edges: WorkflowEdge[] = [
+    edge("trigger-1", "account-data"),
+    edge("account-data", "borrow-power-check"),
+    edge("borrow-power-check", "borrow", "true"),
+  ];
+  return { name: "borrow-against-collateral", description: "Manual: only borrow 0.001 WETH if the account has available borrowing power.", nodes, edges };
+}
+
+/** 6. Debt Position Monitor -- hourly check for any outstanding variable debt on the WETH reserve. */
+export function buildDebtPositionMonitorWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const { address: weth } = tokenInfo(cfg.network, "WETH");
+  const nodes: WorkflowNode[] = [
+    scheduleTriggerNode("0 * * * *", "UTC"),
+    actionNode("reserve-data", 200, { actionType: "aave-v3/get-user-reserve-data", network: cfg.network, asset: weth, user: cfg.user }),
+    conditionNode("debt-check", 400, "{{@reserve-data:Reserve.currentVariableDebtTokenBalance}} > 0"),
+    actionNode("log-debt", 600, { actionType: "web3/check-token-balance", network: cfg.network, address: cfg.user, tokenConfig: tokenConfig(cfg.network, "WETH") }),
+  ];
+  const edges: WorkflowEdge[] = [
+    edge("trigger-1", "reserve-data"),
+    edge("reserve-data", "debt-check"),
+    edge("debt-check", "log-debt", "true"),
+  ];
+  return { name: "debt-position-monitor", description: "Hourly: check for any outstanding variable debt on the WETH reserve; log wallet balance if debt exists.", nodes, edges };
+}
+
+/** 7. Webhook Rebalance Trigger -- an external system calls the webhook to force a withdraw. */
+export function buildWebhookRebalanceWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const { address: weth } = tokenInfo(cfg.network, "WETH");
+  const nodes: WorkflowNode[] = [
+    webhookTriggerNode(),
+    actionNode("reserve-data", 200, { actionType: "aave-v3/get-user-reserve-data", network: cfg.network, asset: weth, user: cfg.user }),
+    conditionNode("has-position", 400, "{{@reserve-data:Reserve.currentATokenBalance}} > 0"),
+    actionNode("rebalance-withdraw", 600, { actionType: "aave-v3/withdraw", network: cfg.network, asset: weth, amount: SMALL_AMOUNT, to: cfg.user }),
+  ];
+  const edges: WorkflowEdge[] = [
+    edge("trigger-1", "reserve-data"),
+    edge("reserve-data", "has-position"),
+    edge("has-position", "rebalance-withdraw", "true"),
+  ];
+  return { name: "webhook-rebalance-trigger", description: "External webhook call: if a supplied position exists, withdraw 0.001 WETH of it (stand-in for an off-chain rebalance signal).", nodes, edges };
+}
+
+/** 8. Block-Interval Sync -- fires every 50 Sepolia blocks (~10min at 12s/block), independent of wall-clock time. */
+export function buildBlockIntervalSyncWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const nodes: WorkflowNode[] = [
+    blockTriggerNode(cfg.network, "50"),
+    actionNode("sync-balance", 200, { actionType: "web3/check-token-balance", network: cfg.network, address: cfg.user, tokenConfig: tokenConfig(cfg.network, "aWETH") }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "sync-balance")];
+  return { name: "block-interval-sync", description: "Every 50 Sepolia blocks: log the current aWETH balance -- a block-native alternative to a wall-clock schedule.", nodes, edges };
+}
+
+/** 9. Event-Triggered Supply Watch -- fires whenever ANY Supply event lands on the Aave V3 Pool, not just this wallet's own. */
+export function buildEventTriggeredSupplyWatchWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const nodes: WorkflowNode[] = [
+    eventTriggerNode(cfg.network, AAVE_V3_SEPOLIA_POOL, "Supply", AAVE_SUPPLY_EVENT_ABI),
+    actionNode("log-own-balance", 200, { actionType: "web3/check-token-balance", network: cfg.network, address: cfg.user, tokenConfig: tokenConfig(cfg.network, "aWETH") }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "log-own-balance")];
+  return { name: "event-triggered-supply-watch", description: "Fires on every Supply event emitted by the Aave V3 Sepolia Pool (market-wide, not just this wallet); logs this wallet's own aWETH balance in response.", nodes, edges };
+}
+
+/** 10. Allowance Auditor -- catches the exact class of bug that broke `basic` earlier this session: a silently-exhausted approval. */
+export function buildAllowanceAuditorWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const nodes: WorkflowNode[] = [
+    scheduleTriggerNode("0 * * * *", "UTC"),
+    actionNode("check-allowance", 200, {
+      actionType: "web3/check-allowance", network: cfg.network, tokenConfig: tokenConfig(cfg.network, "WETH"), ownerAddress: cfg.user, spenderAddress: AAVE_V3_SEPOLIA_POOL,
+    }),
+    conditionNode("low-allowance", 400, "{{@check-allowance:Allowance.allowance}} < 5000000000000000"),
+    actionNode("re-approve", 600, { actionType: "web3/approve-token", network: cfg.network, tokenConfig: tokenConfig(cfg.network, "WETH"), spenderAddress: AAVE_V3_SEPOLIA_POOL, amount: "max" }),
+  ];
+  const edges: WorkflowEdge[] = [
+    edge("trigger-1", "check-allowance"),
+    edge("check-allowance", "low-allowance"),
+    edge("low-allowance", "re-approve", "true"),
+  ];
+  return { name: "allowance-auditor", description: "Hourly: check the Aave Pool's WETH allowance; if it has dropped below 0.005, re-approve unlimited. Prevents the exact 'missing revert data' failure the basic workflow hit live earlier.", nodes, edges };
+}
+
+/** 11. Multi-Asset Balance Snapshot -- both legs of the position (underlying + receipt token) in one run. */
+export function buildMultiAssetBalanceSnapshotWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("weth-balance", 200, { actionType: "web3/check-token-balance", network: cfg.network, address: cfg.user, tokenConfig: tokenConfig(cfg.network, "WETH") }),
+    actionNode("aweth-balance", 400, { actionType: "web3/check-token-balance", network: cfg.network, address: cfg.user, tokenConfig: tokenConfig(cfg.network, "aWETH") }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "weth-balance"), edge("weth-balance", "aweth-balance")];
+  return { name: "multi-asset-balance-snapshot", description: "Manual: log both WETH (idle) and aWETH (supplied) balances in one run.", nodes, edges };
+}
+
+/** 12. Collateral Safety Check -- only disables collateral if health factor can absorb it (health factor is checked, not simulated post-disable -- Aave doesn't expose a dry-run for this). */
+export function buildCollateralSafetyCheckWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const { address: weth } = tokenInfo(cfg.network, "WETH");
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("account-data", 200, { actionType: "aave-v3/get-user-account-data", network: cfg.network, user: cfg.user }),
+    conditionNode("safe-to-disable", 400, "{{@account-data:AccountData.healthFactor}} > 2000000000000000000"),
+    actionNode("disable-collateral", 600, { actionType: "aave-v3/set-collateral", network: cfg.network, asset: weth, useAsCollateral: "false" }),
+    actionNode("abort-log", 400, { actionType: "web3/check-balance", network: cfg.network, address: cfg.user }),
+  ];
+  const edges: WorkflowEdge[] = [
+    edge("trigger-1", "account-data"),
+    edge("account-data", "safe-to-disable"),
+    edge("safe-to-disable", "disable-collateral", "true"),
+    edge("safe-to-disable", "abort-log", "false"),
+  ];
+  return { name: "collateral-safety-check", description: "Manual: only disable WETH as collateral if health factor is comfortably above 2.0; otherwise abort and log.", nodes, edges };
+}
+
+/** 13. Repay Full Debt -- reads the exact current debt rather than a fixed amount, then repays it. */
+export function buildRepayFullDebtWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const { address: weth } = tokenInfo(cfg.network, "WETH");
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("reserve-data", 200, { actionType: "aave-v3/get-user-reserve-data", network: cfg.network, asset: weth, user: cfg.user }),
+    actionNode("repay-all", 400, {
+      actionType: "aave-v3/repay", network: cfg.network, asset: weth,
+      amount: "{{@reserve-data:Reserve.currentVariableDebtTokenBalance}}", onBehalfOf: cfg.user, interestRateMode: "2",
+    }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "reserve-data"), edge("reserve-data", "repay-all")];
+  return { name: "repay-full-debt", description: "Manual: read the exact current variable debt balance and repay precisely that amount, not a guessed fixed amount.", nodes, edges };
+}
+
+/** 14. Borrow Then Track -- borrows, then immediately confirms both the new balance and the resulting health factor. */
+export function buildBorrowThenTrackWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const { address: weth } = tokenInfo(cfg.network, "WETH");
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("borrow", 200, { actionType: "aave-v3/borrow", network: cfg.network, asset: weth, amount: SMALL_AMOUNT, onBehalfOf: cfg.user, interestRateMode: "2", referralCode: "0" }),
+    actionNode("verify-balance", 400, { actionType: "web3/check-token-balance", network: cfg.network, address: cfg.user, tokenConfig: tokenConfig(cfg.network, "WETH") }),
+    actionNode("confirm-health", 600, { actionType: "aave-v3/get-user-account-data", network: cfg.network, user: cfg.user }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "borrow"), edge("borrow", "verify-balance"), edge("verify-balance", "confirm-health")];
+  return { name: "borrow-then-track", description: "Manual: borrow 0.001 WETH, verify it landed in the wallet, then confirm the resulting account health factor.", nodes, edges };
+}
+
+/** 15. Position Health Dashboard Feed -- the richest read-only snapshot: account health + both balances, every 15min. */
+export function buildPositionHealthDashboardFeedWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const nodes: WorkflowNode[] = [
+    scheduleTriggerNode("*/15 * * * *", "UTC"),
+    actionNode("account-data", 200, { actionType: "aave-v3/get-user-account-data", network: cfg.network, user: cfg.user }),
+    actionNode("weth-balance", 400, { actionType: "web3/check-token-balance", network: cfg.network, address: cfg.user, tokenConfig: tokenConfig(cfg.network, "WETH") }),
+    actionNode("aweth-balance", 600, { actionType: "web3/check-token-balance", network: cfg.network, address: cfg.user, tokenConfig: tokenConfig(cfg.network, "aWETH") }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "account-data"), edge("account-data", "weth-balance"), edge("weth-balance", "aweth-balance")];
+  return { name: "position-health-dashboard-feed", description: "Every 15min: account health factor + both WETH and aWETH balances in one run -- feed for a live dashboard.", nodes, edges };
+}
+
+/** 16. Pre-Migration Safety Gate -- what `basic`'s withdraw-source SHOULD be preceded by: a health check before ever touching the position. */
+export function buildPreMigrationSafetyGateWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const { address: weth } = tokenInfo(cfg.network, "WETH");
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("account-data", 200, { actionType: "aave-v3/get-user-account-data", network: cfg.network, user: cfg.user }),
+    conditionNode("safe-to-migrate", 400, "{{@account-data:AccountData.healthFactor}} > 1100000000000000000"),
+    actionNode("withdraw", 600, { actionType: "aave-v3/withdraw", network: cfg.network, asset: weth, amount: SMALL_AMOUNT, to: cfg.user }),
+    actionNode("abort-log", 400, { actionType: "web3/check-balance", network: cfg.network, address: cfg.user }),
+  ];
+  const edges: WorkflowEdge[] = [
+    edge("trigger-1", "account-data"),
+    edge("account-data", "safe-to-migrate"),
+    edge("safe-to-migrate", "withdraw", "true"),
+    edge("safe-to-migrate", "abort-log", "false"),
+  ];
+  return { name: "pre-migration-safety-gate", description: "Manual: only withdraw 0.001 WETH if health factor is above 1.1 first; otherwise abort and log -- a health check `basic` itself doesn't have.", nodes, edges };
+}
+
+/** 17. Gas Buffer Guardian -- native ETH, not WETH: makes sure the wallet can still afford to pay for the NEXT transaction. */
+export function buildGasBufferGuardianWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const nodes: WorkflowNode[] = [
+    scheduleTriggerNode("0 * * * *", "UTC"),
+    actionNode("gas-balance", 200, { actionType: "web3/check-balance", network: cfg.network, address: cfg.user }),
+    conditionNode("low-gas", 400, "{{@gas-balance:Balance.balance}} < 0.001"),
+    actionNode("flag-low-gas", 600, { actionType: "web3/check-balance", network: cfg.network, address: cfg.user }),
+  ];
+  const edges: WorkflowEdge[] = [
+    edge("trigger-1", "gas-balance"),
+    edge("gas-balance", "low-gas"),
+    edge("low-gas", "flag-low-gas", "true"),
+  ];
+  return { name: "gas-buffer-guardian", description: "Hourly: check native ETH balance; if below 0.001, flag it -- every other workflow here needs gas to run at all.", nodes, edges };
+}
+
+/** 18. Full Position Report -- everything readable about this position in one workflow: account health, reserve detail, both balances. */
+export function buildFullPositionReportWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const { address: weth } = tokenInfo(cfg.network, "WETH");
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("account-data", 200, { actionType: "aave-v3/get-user-account-data", network: cfg.network, user: cfg.user }),
+    actionNode("reserve-data", 400, { actionType: "aave-v3/get-user-reserve-data", network: cfg.network, asset: weth, user: cfg.user }),
+    actionNode("aweth-balance", 600, { actionType: "web3/check-token-balance", network: cfg.network, address: cfg.user, tokenConfig: tokenConfig(cfg.network, "aWETH") }),
+    actionNode("weth-balance", 800, { actionType: "web3/check-token-balance", network: cfg.network, address: cfg.user, tokenConfig: tokenConfig(cfg.network, "WETH") }),
+  ];
+  const edges: WorkflowEdge[] = [
+    edge("trigger-1", "account-data"),
+    edge("account-data", "reserve-data"),
+    edge("reserve-data", "aweth-balance"),
+    edge("aweth-balance", "weth-balance"),
+  ];
+  return { name: "full-position-report", description: "Manual: the complete readable position in one run -- account health, per-reserve detail, both balances.", nodes, edges };
+}
+
+/** 19. Re-enable Collateral After Repay -- pairs a repay with restoring the reserve's collateral flag, in one workflow. */
+export function buildReenableCollateralAfterRepayWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const { address: weth } = tokenInfo(cfg.network, "WETH");
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("repay", 200, { actionType: "aave-v3/repay", network: cfg.network, asset: weth, amount: SMALL_AMOUNT, onBehalfOf: cfg.user, interestRateMode: "2" }),
+    actionNode("re-enable-collateral", 400, { actionType: "aave-v3/set-collateral", network: cfg.network, asset: weth, useAsCollateral: "true" }),
+  ];
+  const edges: WorkflowEdge[] = [edge("trigger-1", "repay"), edge("repay", "re-enable-collateral")];
+  return { name: "re-enable-collateral-after-repay", description: "Manual: repay 0.001 WETH of debt, then re-enable WETH as collateral in the same run.", nodes, edges };
+}
+
+/** 20. Emergency Debt Clear -- emergency-exit's counterpart for the debt side: only acts if there's actually debt to clear. */
+export function buildEmergencyDebtClearWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const { address: weth } = tokenInfo(cfg.network, "WETH");
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("reserve-data", 200, { actionType: "aave-v3/get-user-reserve-data", network: cfg.network, asset: weth, user: cfg.user }),
+    conditionNode("has-debt", 400, "{{@reserve-data:Reserve.currentVariableDebtTokenBalance}} > 0"),
+    actionNode("repay-all", 600, {
+      actionType: "aave-v3/repay", network: cfg.network, asset: weth,
+      amount: "{{@reserve-data:Reserve.currentVariableDebtTokenBalance}}", onBehalfOf: cfg.user, interestRateMode: "2",
+    }),
+    actionNode("log-no-debt", 400, { actionType: "web3/check-token-balance", network: cfg.network, address: cfg.user, tokenConfig: tokenConfig(cfg.network, "WETH") }),
+  ];
+  const edges: WorkflowEdge[] = [
+    edge("trigger-1", "reserve-data"),
+    edge("reserve-data", "has-debt"),
+    edge("has-debt", "repay-all", "true"),
+    edge("has-debt", "log-no-debt", "false"),
+  ];
+  return { name: "emergency-debt-clear", description: "Manual panic button for the debt side: if any variable debt exists on WETH, repay it in full; otherwise log that there was nothing to clear.", nodes, edges };
 }

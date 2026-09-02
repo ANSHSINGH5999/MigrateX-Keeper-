@@ -36,6 +36,7 @@ for two cases where the obvious field name was wrong.
 - [Environment variables](#environment-variables)
 - [Node config reference](#node-config-reference)
 - [Unhappy paths handled](#unhappy-paths-handled)
+- [20 additional feature workflows](#20-additional-feature-workflows)
 - [Tech stack](#tech-stack)
 - [Status](#status)
 - [Bounty track](#bounty-track)
@@ -265,17 +266,51 @@ plausible-sounding name — this table exists because several of the obvious nam
   Space Mono, DM Sans).
 - **Execution layer** — KeeperHub MCP (streamable-HTTP JSON-RPC), Sepolia testnet, Aave V3.
 
+## 20 additional feature workflows
+
+Beyond the 5 core workflows, this repo also exercises the rest of KeeperHub's real Aave V3
+action surface (`borrow`, `repay`, `set-collateral`, `get-user-account-data`) and every real
+trigger type (`Manual`/`Schedule`/`Webhook`/`Event`/`Block`) as 20 more workflows. All 20 are
+real: created via `create_workflow` and confirmed `valid: true` via `validate_workflow(deepCheck:
+true)` against the live server, zero errors, zero warnings. Unlike `basic` and `emergency`, none
+of these 20 have been executed — several would open real debt or move real funds, and that isn't
+implied by building the feature. Run any one with `node dist/index.js --feature <name>
+[--execute]`; IDs live in `orchestrator/workflows.json`'s `features` map.
+
+| Feature | Trigger | What it does |
+|---|---|---|
+| `health-factor-monitor` | Schedule (1h) | Reads overall account health factor (not just one reserve); logs a warning if below 1.5. |
+| `enable-collateral` | Manual | Marks the WETH reserve as usable collateral. |
+| `disable-collateral` | Manual | Marks WETH as NOT usable collateral, without withdrawing it. |
+| `auto-repay-on-low-health` | Schedule (30min) | Repays 0.001 WETH of debt if health factor drops below 1.2. |
+| `borrow-against-collateral` | Manual | Only borrows 0.001 WETH if the account actually has available borrowing power. |
+| `debt-position-monitor` | Schedule (1h) | Checks for outstanding variable debt on WETH; logs wallet balance if any exists. |
+| `webhook-rebalance-trigger` | Webhook | External signal triggers a 0.001 WETH withdraw if a position exists. |
+| `block-interval-sync` | Block (every 50) | Logs aWETH balance on a block-native cadence instead of wall-clock time. |
+| `event-triggered-supply-watch` | Event (`Supply` on the Pool) | Fires on ANY Supply event market-wide; logs this wallet's own aWETH balance in response. |
+| `allowance-auditor` | Schedule (1h) | Checks the Pool's WETH allowance; re-approves unlimited if it's dropped below 0.005 — guards against the exact failure `basic` hit live (see [Verified execution](#verified-execution)). |
+| `multi-asset-balance-snapshot` | Manual | Logs both WETH and aWETH balances in one run. |
+| `collateral-safety-check` | Manual | Only disables WETH collateral if health factor is comfortably above 2.0; aborts and logs otherwise. |
+| `repay-full-debt` | Manual | Reads the exact live debt balance via a template reference and repays precisely that, not a guessed amount. |
+| `borrow-then-track` | Manual | Borrows 0.001 WETH, verifies the balance, then confirms the resulting health factor. |
+| `position-health-dashboard-feed` | Schedule (15min) | Account health + both balances in one run — a dashboard feed. |
+| `pre-migration-safety-gate` | Manual | Only withdraws if health factor is above 1.1 first — a check `basic` itself doesn't have. |
+| `gas-buffer-guardian` | Schedule (1h) | Flags it if native ETH balance drops below 0.001 — every workflow here needs gas to run at all. |
+| `full-position-report` | Manual | The complete readable position: account health, per-reserve detail, both balances. |
+| `re-enable-collateral-after-repay` | Manual | Repays 0.001 WETH of debt, then re-enables WETH as collateral in the same run. |
+| `emergency-debt-clear` | Manual | Panic button for debt: repays it in full if any exists, otherwise logs that there was nothing to clear. |
+
 ## Status
 
 - [x] Rust policy core (`p-token-migrator --output-plan`) with pair/address/amount validation
       and unit tests.
-- [x] TypeScript workflow builder producing all 4 graphs above from real, schema-verified node
-      configs.
+- [x] TypeScript workflow builder producing all 5 core graphs, plus 20 feature workflows, from
+      real, schema-verified node configs.
 - [x] KeeperHub MCP client, dry-run flow, audit polling, all exercised against the live
       production MCP server.
-- [x] All 5 workflows created and `validate_workflow(deepCheck: true)`-passing on KeeperHub.
-- [x] Real Sepolia execution of the `basic` workflow, independently verified on-chain (see
-      [Verified execution](#verified-execution)).
+- [x] All 25 workflows created and `validate_workflow(deepCheck: true)`-passing on KeeperHub.
+- [x] Real Sepolia execution of the `basic` and `emergency` workflows, independently verified
+      on-chain (see [Verified execution](#verified-execution)).
 - [x] `ui/` Next.js app — real Server Actions, no mocked data.
 - [ ] Demo video, bounty PR (`web3/batch-token-check` using multicall3).
 
