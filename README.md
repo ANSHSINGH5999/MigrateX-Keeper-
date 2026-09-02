@@ -58,18 +58,28 @@ orchestrator/         TypeScript. Talks JSON-RPC 2.0 directly to the KeeperHub M
                        by hand against the live server: session handshake via an
                        `Mcp-Session-Id` response header, tool results wrapped as
                        `{content:[{type:"text",text:"<json>"}]}`).
-  src/workflow-builder.ts   builds all 5 workflow graphs below (agent-authored, not templates)
+  src/workflow-builder.ts   builds all 38 workflow graphs below (agent-authored, not templates)
   src/keeperhub.ts           MCP client — session handshake, tools/call, response unwrapping
   src/dry-run.ts             create_workflow (disabled) + validate_workflow before any real run
   src/audit.ts               polls get_execution until terminal, extracts transaction hashes
-  src/index.ts                CLI entry: --workflow {basic|scheduled|guardian|advanced|emergency} [--execute]
-  workflows.json              registry of the 5 live, pre-created workflow IDs (below)
+  src/index.ts                CLI entry: --workflow {basic|scheduled|guardian|advanced|emergency}
+                               or --feature <name> (any of the 33 feature/leverage/integration
+                               workflows), plus [--execute]
+  workflows.json              registry of all 38 live, pre-created workflow IDs + the real
+                               KeeperHub project/tag ids (below) — read by both the CLI and the
+                               UI's Workflow Catalog, one source of truth
 
 ui/                  Next.js 16 (App Router, Turbopack) app. Real Server Actions call the same
                       compiled Rust binary and the same KeeperHubClient the CLI uses — there is
                       no simulated or mocked data path between the browser and the live chain.
-  app/actions.ts             Server Actions: generatePlan / runDryRun / runExecution
-  app/MigrationConsole.tsx    client console wired to the actions above via useTransition
+  app/actions.ts             Server Actions: generatePlan / runDryRun / runExecution /
+                               listWorkflowCatalog / validateWorkflowById
+  app/MigrationConsole.tsx    client console for the `basic` workflow, wired to the actions
+                               above via useTransition
+  app/components/WorkflowCatalog.tsx   lists all 37 pre-created workflows (everything except
+                               `basic`) with live Validate/Execute buttons per row — Execute
+                               stays disabled until that row validates clean, the same
+                               validate-before-execute discipline the CLI enforces
   app/components/            editorial landing page (hero, how-it-works, architecture, canvas
                               particle animations) + the live 6-step execution monitor (ExecPanel)
   lib/                        copies of orchestrator/src, .js import extensions stripped —
@@ -206,7 +216,8 @@ node dist/index.js --workflow advanced
 # 4. Execute for real
 node dist/index.js --workflow advanced --execute
 
-# 5. Or drive the UI
+# 5. Or drive the UI — the Migration Console runs `basic`; the Workflow
+#    Catalog section lists and runs any of the other 37
 cd ../ui && npm install && npm run dev -- -p 3200
 ```
 
@@ -426,7 +437,9 @@ action.
 - [x] Real Sepolia execution of the `basic`, `emergency` workflows and all 7 read-only
       integration workflows, independently verified on-chain / by execution status (see
       [Verified execution](#verified-execution)).
-- [x] `ui/` Next.js app — real Server Actions, no mocked data.
+- [x] `ui/` Next.js app — real Server Actions, no mocked data; a Workflow Catalog section
+      surfaces all 37 pre-created workflows (everything but `basic`) with live Validate/Execute
+      controls, gated the same validate-before-execute way the CLI is.
 - [ ] Demo video, bounty PR (`web3/batch-token-check` using multicall3).
 
 ## Bounty track
