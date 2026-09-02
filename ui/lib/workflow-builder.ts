@@ -163,8 +163,8 @@ const AAVE_V3_SEPOLIA_POOL = "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951";
  * liquidity, 49/50 of its most recent transactions succeeding, and
  * KeeperHub's aave-v3 plugin accepting network 11155111 on a real call.
  *
- * 7-node linear graph:
- *   trigger-1 -> withdraw-source -> verify-withdraw -> approve-aave -> supply-target -> verify-supply -> notify-telegram
+ * 6-node linear graph:
+ *   trigger-1 -> withdraw-source -> verify-withdraw -> approve-aave -> supply-target -> verify-supply
  *
  * approve-aave (web3/approve-token, amount "max") exists because
  * aave-v3/supply's underlying Pool.supply() needs transferFrom, which
@@ -177,13 +177,11 @@ const AAVE_V3_SEPOLIA_POOL = "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951";
  * every run of this workflow self-sufficient rather than depending on an
  * approval done out of band.
  *
- * notify-telegram (telegram/send-message) posts the final aWETH balance
- * after every real migration. Its `chatId` below is a placeholder --
- * replace it with a real chat/channel id, and add a Telegram integration
- * in your KeeperHub account settings, before this leg can actually send
- * (confirmed live: this account currently has no messaging integration
- * configured at all, only the wallet -- the node is real and
- * schema-verified, the destination is the part only you can supply).
+ * (A notify-telegram leg was tried here briefly -- removed again since
+ * no Telegram integration is configured on this KeeperHub account, so it
+ * could never actually send. `telegram-health-alert` in the 11
+ * multi-protocol integrations still demonstrates the same node pattern
+ * on its own, without being fused into the money-moving core workflow.)
  *
  * Source and target are the same Aave V3 Sepolia market (a same-market
  * round trip: withdraw then re-supply), since there is only one Aave V3
@@ -236,11 +234,6 @@ export function buildMigrationWorkflow(plan: MigrationPlan): KeeperHubWorkflow {
       address: plan.recipient_address,
       tokenConfig: tokenConfig(plan.network, plan.token),
     }),
-    actionNode("notify-telegram", 1000, {
-      actionType: "telegram/send-message",
-      chatId: "@your_telegram_chat",
-      message: `MigrateX: migration complete. Final ${plan.token} balance: {{@verify-supply:Balance.balance.balance}} ${plan.token}.`,
-    }),
   ];
 
   const edges: WorkflowEdge[] = [
@@ -249,7 +242,6 @@ export function buildMigrationWorkflow(plan: MigrationPlan): KeeperHubWorkflow {
     edge("verify-withdraw", "approve-aave"),
     edge("approve-aave", "supply-target"),
     edge("supply-target", "verify-supply"),
-    edge("verify-supply", "notify-telegram"),
   ];
 
   return {
