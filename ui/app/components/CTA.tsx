@@ -21,13 +21,15 @@ export default function CTA() {
             Open Console
           </a>
           <a
-            href="#how-it-works"
+            href="https://github.com/ANSHSINGH5999/MigrateX-Keeper-#readme"
+            target="_blank"
+            rel="noreferrer"
             className="text-center font-mono text-xs uppercase tracking-[0.03em] px-6 py-3.5 border-[1.5px] border-ink rounded-[3px] bg-cream shadow-[4px_4px_0_var(--color-ink)] hover:bg-white transition-all duration-200"
           >
             Read Docs
           </a>
           <a
-            href="https://github.com"
+            href="https://github.com/ANSHSINGH5999/MigrateX-Keeper-"
             target="_blank"
             rel="noreferrer"
             className="text-center font-mono text-xs uppercase tracking-[0.03em] px-6 py-3.5 border-[1.5px] border-ink rounded-[3px] bg-cream shadow-[4px_4px_0_var(--color-ink)] hover:bg-white transition-all duration-200"

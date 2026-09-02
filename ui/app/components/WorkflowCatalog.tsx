@@ -29,13 +29,17 @@ type RowResult = { type: "validate"; data: ValidateResult } | { type: "execute";
 
 export default function WorkflowCatalog() {
   const [entries, setEntries] = useState<CatalogEntry[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [filter, setFilter] = useState<Category | "all">("all");
   const [results, setResults] = useState<Record<string, RowResult>>({});
+  const [validated, setValidated] = useState<Record<string, boolean>>({});
   const [pending, setPending] = useState<Record<string, "validate" | "execute" | undefined>>({});
   const [, startTransition] = useTransition();
 
   useEffect(() => {
-    listWorkflowCatalog().then(setEntries);
+    listWorkflowCatalog()
+      .then(setEntries)
+      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
   }, []);
 
   function onValidate(workflowId: string) {
@@ -43,11 +47,13 @@ export default function WorkflowCatalog() {
     startTransition(async () => {
       const data = await validateWorkflowById(workflowId);
       setResults((r) => ({ ...r, [workflowId]: { type: "validate", data } }));
+      setValidated((v) => ({ ...v, [workflowId]: data.ok && data.valid }));
       setPending((p) => ({ ...p, [workflowId]: undefined }));
     });
   }
 
   function onExecute(workflowId: string) {
+    if (!validated[workflowId]) return;
     setPending((p) => ({ ...p, [workflowId]: "execute" }));
     startTransition(async () => {
       const data = await runExecution(workflowId);
@@ -63,14 +69,15 @@ export default function WorkflowCatalog() {
       <section id="catalog" className="py-24 px-8 lg:px-14">
         <div className="max-w-[640px] mx-auto text-center mb-10">
           <div className="font-mono text-[10px] tracking-[0.14em] uppercase text-dim mb-2.5">
-            {entries ? `${entries.length} Live Workflows` : "Loading…"}
+            {entries ? `${entries.length} Live Workflows` : loadError ? "Failed to load" : "Loading…"}
           </div>
           <h2 className="font-serif text-[42px]">Workflow catalog</h2>
           <span className="font-cursive text-gold text-[30px] block mt-1">Every one, real.</span>
           <p className="text-sm text-dim mt-3">
             Validate or execute any workflow this project has created on KeeperHub, straight from
             the browser — the same <code className="font-mono text-xs bg-cream-hover px-1">deepCheck</code>{" "}
-            validation and live execution the CLI runs, no simulated data.
+            validation and live execution the CLI runs, no simulated data. Execute unlocks once a
+            row validates clean.
           </p>
         </div>
 
@@ -89,7 +96,12 @@ export default function WorkflowCatalog() {
         </div>
 
         <div className="max-w-[820px] mx-auto border-[1.5px] border-ink">
-          {!entries && <div className="p-8 text-center font-mono text-xs text-dim">Loading catalog…</div>}
+          {!entries && !loadError && <div className="p-8 text-center font-mono text-xs text-dim">Loading catalog…</div>}
+          {loadError && (
+            <div className="p-8 text-center font-mono text-xs text-log-error">
+              ✗ Could not load the workflow catalog: {loadError}
+            </div>
+          )}
           {entries &&
             visible.map((entry, i) => (
               <div
@@ -114,8 +126,9 @@ export default function WorkflowCatalog() {
                     </button>
                     <button
                       onClick={() => onExecute(entry.workflowId)}
-                      disabled={!!pending[entry.workflowId]}
-                      className="font-mono text-[10px] uppercase tracking-[0.03em] px-3 py-1.5 border-[1.5px] border-ink rounded-[3px] bg-gold hover:bg-gold-hover disabled:opacity-40 transition-colors"
+                      disabled={!!pending[entry.workflowId] || !validated[entry.workflowId]}
+                      title={validated[entry.workflowId] ? undefined : "Validate this workflow first"}
+                      className="font-mono text-[10px] uppercase tracking-[0.03em] px-3 py-1.5 border-[1.5px] border-ink rounded-[3px] bg-gold hover:bg-gold-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                     >
                       {pending[entry.workflowId] === "execute" ? "running…" : "Execute"}
                     </button>
