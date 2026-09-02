@@ -42,8 +42,14 @@ function parseArgs(argv: string[]): Cli {
 }
 
 interface WorkflowRegistry {
-  [kind: string]: string | Record<string, string>;
+  basic: string;
+  scheduled: string;
+  guardian: string;
+  advanced: string;
+  emergency: string;
   features: Record<string, string>;
+  leverage: Record<string, string>;
+  organization?: { projectId: string; projectName: string; tags: Record<string, string> };
 }
 
 function loadRegistry(): WorkflowRegistry {
@@ -62,18 +68,24 @@ function loadRegistry(): WorkflowRegistry {
 function loadWorkflowId(kind: Exclude<WorkflowKind, "basic">): string {
   const registry = loadRegistry();
   const id = registry[kind];
-  if (!id || typeof id !== "string") {
+  if (!id) {
     throw new Error(`No workflow id for '${kind}' in workflows.json`);
   }
   return id;
 }
 
-/** The 20 feature workflows live under workflows.json's `features` map, addressed by --feature <name> instead of --workflow. */
+/**
+ * The 20 feature workflows and 2 leverage-pair workflows live under
+ * workflows.json's `features`/`leverage` maps respectively, addressed by
+ * --feature <name> instead of --workflow (checked in that order, so a
+ * name collision would silently prefer `features` -- there isn't one).
+ */
 function loadFeatureId(name: string): string {
   const registry = loadRegistry();
-  const id = registry.features[name];
+  const id = registry.features[name] ?? registry.leverage[name];
   if (!id) {
-    throw new Error(`No feature id for '${name}' in workflows.json's "features" map. Known: ${Object.keys(registry.features).join(", ")}`);
+    const known = [...Object.keys(registry.features), ...Object.keys(registry.leverage)];
+    throw new Error(`No feature id for '${name}' in workflows.json. Known: ${known.join(", ")}`);
   }
   return id;
 }

@@ -25,5 +25,18 @@
     "full-position-report": "bz9jn7i1rf16cw49v6ao3",
     "re-enable-collateral-after-repay": "cbzh3sik75oqijz1xk5j4",
     "emergency-debt-clear": "hiqc7hzgolxtp7wbxmhm8"
+  },
+  "leverage": {
+    "leverage-loop": "nnrafy0bhpygnvxv664o8",
+    "deleverage": "pe1p8yhcd0mc8fymdxsoi"
+  },
+  "organization": {
+    "projectId": "gzwk0kvj8143jlb7bzkv9",
+    "projectName": "MigrateX",
+    "tags": {
+      "core": "8kp2504da95763hddoqb6",
+      "feature": "gxzr3zmaiuv2rs0z2b8ty",
+      "leverage": "heqyl0t1jonbesdfr8b8s"
+    }
   }
 }

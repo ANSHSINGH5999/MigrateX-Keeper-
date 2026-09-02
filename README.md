@@ -37,6 +37,9 @@ for two cases where the obvious field name was wrong.
 - [Node config reference](#node-config-reference)
 - [Unhappy paths handled](#unhappy-paths-handled)
 - [20 additional feature workflows](#20-additional-feature-workflows)
+- [Leverage pair](#leverage-pair)
+- [Real KeeperHub project organization](#real-keeperhub-project-organization)
+- [Discovered but out of scope](#discovered-but-out-of-scope)
 - [Tech stack](#tech-stack)
 - [Status](#status)
 - [Bounty track](#bounty-track)
@@ -300,15 +303,63 @@ implied by building the feature. Run any one with `node dist/index.js --feature 
 | `re-enable-collateral-after-repay` | Manual | Repays 0.001 WETH of debt, then re-enables WETH as collateral in the same run. |
 | `emergency-debt-clear` | Manual | Panic button for debt: repays it in full if any exists, otherwise logs that there was nothing to clear. |
 
+## Leverage pair
+
+The 27 workflows above each call at most one Aave V3 write action per branch. These two chain
+**three** writes into a single recursive leverage loop — a real DeFi primitive, not another
+balance-check permutation:
+
+| Workflow | Nodes | What it does |
+|---|---|---|
+| `leverage-loop` | [`nnrafy0bhpygnvxv664o8`](https://app.keeperhub.com) (7 nodes) | Supply 0.001 WETH → check borrowing power → borrow 0.001 WETH against it (only if power allows) → re-supply the borrowed amount → confirm the resulting health factor. |
+| `deleverage` | [`pe1p8yhcd0mc8fymdxsoi`](https://app.keeperhub.com) (5 nodes) | Reads the exact live variable debt balance and repays it, withdraws the extra 0.001 WETH the loop added, then confirms health factor. |
+
+```bash
+node dist/index.js --feature leverage-loop --execute
+node dist/index.js --feature deleverage --execute
+```
+
+WETH is used on both legs (as collateral **and** the borrowed asset) because it's the only
+funded Sepolia reserve this project has verified live — that's an honest description of what's
+demonstrated (the looping mechanism), not a claim this is a profitable production strategy;
+borrowing the same asset you supplied has no yield differential.
+
+## Real KeeperHub project organization
+
+All 27 workflows above are grouped under a real KeeperHub project, created and verified live via
+`create_project` / `create_tag` / `update_workflow` — not just a naming convention in this repo:
+
+- **Project:** `MigrateX` (`gzwk0kvj8143jlb7bzkv9`) — `list_projects` confirms `workflowCount: 27`.
+- **Tags:** `core` (the 5 main workflows), `feature` (the 20 read/monitor/action workflows),
+  `leverage` (the 2 compound leverage workflows).
+
+## Discovered but out of scope
+
+Two more real KeeperHub capabilities were found and schema-verified while building this, but
+deliberately not wired in:
+
+- **`tempo_sign_and_hold` / `tempo_release_hold` / `tempo_cancel_hold`** — a genuine hold-then-release
+  payment primitive (sign a transfer now, broadcast it later on release or cancel). It targets
+  **Tempo Testnet** (chain ID `42431`, confirmed real and `stable` in KeeperHub's chain list) —
+  a different chain than the Sepolia/Aave position this project is funded on. Demonstrating it
+  for real would need a separately funded Tempo testnet wallet, which this project doesn't have;
+  building it without a live broadcast would break this repo's own "verify on-chain, don't just
+  claim it" standard.
+- **`call_workflow`** — lets one workflow invoke another, but only by its public marketplace
+  `listedSlug` (via `list_workflow`), meaning composition this way requires publishing a workflow
+  publicly on KeeperHub first. That's a real, distinct action from anything else in this repo and
+  wasn't taken without asking.
+
 ## Status
 
 - [x] Rust policy core (`p-token-migrator --output-plan`) with pair/address/amount validation
       and unit tests.
-- [x] TypeScript workflow builder producing all 5 core graphs, plus 20 feature workflows, from
-      real, schema-verified node configs.
+- [x] TypeScript workflow builder producing all 5 core graphs, 20 feature workflows, and the
+      leverage pair, from real, schema-verified node configs.
 - [x] KeeperHub MCP client, dry-run flow, audit polling, all exercised against the live
       production MCP server.
-- [x] All 25 workflows created and `validate_workflow(deepCheck: true)`-passing on KeeperHub.
+- [x] All 27 workflows created and `validate_workflow(deepCheck: true)`-passing on KeeperHub,
+      organized under a real KeeperHub project + tags.
 - [x] Real Sepolia execution of the `basic` and `emergency` workflows, independently verified
       on-chain (see [Verified execution](#verified-execution)).
 - [x] `ui/` Next.js app — real Server Actions, no mocked data.

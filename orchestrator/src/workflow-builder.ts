@@ -874,3 +874,72 @@ export function buildEmergencyDebtClearWorkflow(cfg: MonitorConfig): KeeperHubWo
   ];
   return { name: "emergency-debt-clear", description: "Manual panic button for the debt side: if any variable debt exists on WETH, repay it in full; otherwise log that there was nothing to clear.", nodes, edges };
 }
+
+/* ------------------------------------------------------------------------
+ * LEVERAGE PAIR -- the 25 workflows above (5 core + 20 features) each call
+ * exactly one Aave V3 write action per "leg." These two chain THREE writes
+ * (supply -> borrow -> supply, and its inverse) into a single recursive
+ * leverage loop -- a real DeFi primitive (looping the same collateral
+ * asset to amplify exposure), not another balance-check permutation.
+ * WETH is used on both legs (collateral AND the borrowed asset) because
+ * it's the only funded Sepolia reserve this project has verified live;
+ * that's honest about what's actually being demonstrated here, not a
+ * claim this is a profitable production strategy (borrowing the same
+ * asset you supplied has no yield differential -- the point is the
+ * mechanism, not the economics).
+ * ------------------------------------------------------------------------ */
+
+/** WORKFLOW -- Leverage Loop: supply -> check borrowing power -> borrow -> re-supply the borrowed amount -> confirm resulting health factor. */
+export function buildLeverageLoopWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const { address: weth } = tokenInfo(cfg.network, "WETH");
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("supply-initial", 200, { actionType: "aave-v3/supply", network: cfg.network, asset: weth, amount: SMALL_AMOUNT, onBehalfOf: cfg.user, referralCode: "0" }),
+    actionNode("account-check", 400, { actionType: "aave-v3/get-user-account-data", network: cfg.network, user: cfg.user }),
+    conditionNode("has-borrow-power", 600, "{{@account-check:AccountData.availableBorrowsBase}} > 0"),
+    actionNode("borrow-against", 800, { actionType: "aave-v3/borrow", network: cfg.network, asset: weth, amount: SMALL_AMOUNT, onBehalfOf: cfg.user, interestRateMode: "2", referralCode: "0" }),
+    actionNode("supply-borrowed", 1000, { actionType: "aave-v3/supply", network: cfg.network, asset: weth, amount: SMALL_AMOUNT, onBehalfOf: cfg.user, referralCode: "0" }),
+    actionNode("confirm-leverage", 1200, { actionType: "aave-v3/get-user-account-data", network: cfg.network, user: cfg.user }),
+  ];
+  const edges: WorkflowEdge[] = [
+    edge("trigger-1", "supply-initial"),
+    edge("supply-initial", "account-check"),
+    edge("account-check", "has-borrow-power"),
+    edge("has-borrow-power", "borrow-against", "true"),
+    edge("borrow-against", "supply-borrowed"),
+    edge("supply-borrowed", "confirm-leverage"),
+  ];
+  return {
+    name: "leverage-loop",
+    description: "Supply 0.001 WETH, borrow 0.001 WETH against it (only if borrowing power allows), re-supply the borrowed amount, then confirm the resulting health factor -- one recursive leverage loop.",
+    nodes,
+    edges,
+  };
+}
+
+/** WORKFLOW -- Deleverage: reads the LIVE debt balance and repays exactly that, then withdraws the extra collateral the loop above added. */
+export function buildDeleverageWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const { address: weth } = tokenInfo(cfg.network, "WETH");
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("reserve-check", 200, { actionType: "aave-v3/get-user-reserve-data", network: cfg.network, asset: weth, user: cfg.user }),
+    actionNode("repay-debt", 400, {
+      actionType: "aave-v3/repay", network: cfg.network, asset: weth,
+      amount: "{{@reserve-check:Reserve.currentVariableDebtTokenBalance}}", onBehalfOf: cfg.user, interestRateMode: "2",
+    }),
+    actionNode("withdraw-extra", 600, { actionType: "aave-v3/withdraw", network: cfg.network, asset: weth, amount: SMALL_AMOUNT, to: cfg.user }),
+    actionNode("confirm-unwound", 800, { actionType: "aave-v3/get-user-account-data", network: cfg.network, user: cfg.user }),
+  ];
+  const edges: WorkflowEdge[] = [
+    edge("trigger-1", "reserve-check"),
+    edge("reserve-check", "repay-debt"),
+    edge("repay-debt", "withdraw-extra"),
+    edge("withdraw-extra", "confirm-unwound"),
+  ];
+  return {
+    name: "deleverage",
+    description: "Unwind the leverage loop: repay the exact live variable debt balance, withdraw the extra 0.001 WETH the loop supplied, then confirm the resulting health factor.",
+    nodes,
+    edges,
+  };
+}

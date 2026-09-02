@@ -24,6 +24,8 @@ import {
   buildFullPositionReportWorkflow,
   buildReenableCollateralAfterRepayWorkflow,
   buildEmergencyDebtClearWorkflow,
+  buildLeverageLoopWorkflow,
+  buildDeleverageWorkflow,
 } from "./workflow-builder.js";
 import type { KeeperHubWorkflow, MigrationPlan, WorkflowNode } from "./types.js";
 
@@ -237,4 +239,33 @@ test("collateral-safety-check and pre-migration-safety-gate both gate on healthF
     assert.ok(cond, "expected a Condition node");
     assert.match(cond!.data.config.condition as string, /healthFactor/);
   }
+});
+
+test("leverage-loop chains supply -> borrow -> supply (three writes, not one)", () => {
+  const wf = buildLeverageLoopWorkflow(featureCfg);
+  const writeActionTypes = wf.nodes
+    .filter((n) => n.type === "action" && n.data.config.actionType !== "Condition")
+    .map((n) => n.data.config.actionType);
+  assert.deepEqual(writeActionTypes, [
+    "aave-v3/supply",
+    "aave-v3/get-user-account-data",
+    "aave-v3/borrow",
+    "aave-v3/supply",
+    "aave-v3/get-user-account-data",
+  ]);
+  const gate = node(wf, "has-borrow-power");
+  assert.equal(gate.data.config.actionType, "Condition");
+  assert.match(gate.data.config.condition as string, /availableBorrowsBase/);
+});
+
+test("deleverage repays the LIVE debt balance (not a guessed amount) before withdrawing", () => {
+  const wf = buildDeleverageWorkflow(featureCfg);
+  const repay = node(wf, "repay-debt");
+  assert.match(repay.data.config.amount as string, /^\{\{@.*currentVariableDebtTokenBalance\}\}$/);
+  const withdraw = node(wf, "withdraw-extra");
+  assert.equal(withdraw.data.config.actionType, "aave-v3/withdraw");
+  // repay must precede withdraw in the graph
+  const repayIdx = wf.edges.findIndex((e) => e.target === "repay-debt");
+  const withdrawIdx = wf.edges.findIndex((e) => e.target === "withdraw-extra");
+  assert.ok(repayIdx < withdrawIdx, "repay-debt must be reached before withdraw-extra");
 });
