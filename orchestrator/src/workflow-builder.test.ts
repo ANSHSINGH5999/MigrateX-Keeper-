@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { buildMigrationWorkflow } from "./workflow-builder.js";
-import type { MigrationPlan, WorkflowNode } from "./types.js";
+import { buildMigrationWorkflow, buildEmergencyExitWorkflow } from "./workflow-builder.js";
+import type { KeeperHubWorkflow, MigrationPlan, WorkflowNode } from "./types.js";
 
 // Aave V3's real Sepolia WETH reserve, confirmed live via getReservesList()/
 // getReserveData() against the Pool at 0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951.
@@ -19,7 +19,7 @@ const aaveV3Plan: MigrationPlan = {
   slippage_bps: 0,
 };
 
-function node(wf: ReturnType<typeof buildMigrationWorkflow>, id: string): WorkflowNode {
+function node(wf: KeeperHubWorkflow, id: string): WorkflowNode {
   const n = wf.nodes.find((n) => n.id === id);
   assert.ok(n, `expected node '${id}' to exist`);
   return n!;
@@ -92,4 +92,24 @@ test("balance-check nodes use the real Aave-reserve WETH address via tokenConfig
   const parsed = JSON.parse(verify.data.config.tokenConfig as string);
   assert.equal(parsed.customToken.symbol, "WETH");
   assert.equal(parsed.customToken.address, "0xC558DBdd856501FCd9aaF1E62eae57A9F0629a3c");
+});
+
+test("WORKFLOW 5 -- emergency-exit: 5-node linear graph, manual trigger only", () => {
+  const wf = buildEmergencyExitWorkflow({ network: "11155111", user: `0x${"33".repeat(20)}` });
+  assert.equal(wf.nodes.length, 5);
+  assert.deepEqual(
+    wf.nodes.map((n) => n.id),
+    ["trigger-1", "preflight", "withdraw-all", "verify-exit", "confirm-closed"]
+  );
+  assert.equal(wf.nodes[0]!.data.config.triggerType, "Manual");
+});
+
+test("emergency-exit withdraws the ENTIRE position via the uint256-max sentinel, not a fixed amount", () => {
+  const wf = buildEmergencyExitWorkflow({ network: "11155111", user: `0x${"33".repeat(20)}` });
+  const withdraw = node(wf, "withdraw-all");
+  assert.equal(withdraw.data.config.actionType, "aave-v3/withdraw");
+  assert.equal(
+    withdraw.data.config.amount,
+    "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+  );
 });

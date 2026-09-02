@@ -29,7 +29,7 @@ for two cases where the obvious field name was wrong.
 ## Table of contents
 
 - [Architecture](#architecture)
-- [The 4 workflows](#the-4-workflows)
+- [The 5 workflows](#the-5-workflows)
 - [Verified execution](#verified-execution)
 - [Setup](#setup)
 - [Running](#running)
@@ -53,12 +53,12 @@ orchestrator/         TypeScript. Talks JSON-RPC 2.0 directly to the KeeperHub M
                        by hand against the live server: session handshake via an
                        `Mcp-Session-Id` response header, tool results wrapped as
                        `{content:[{type:"text",text:"<json>"}]}`).
-  src/workflow-builder.ts   builds all 4 workflow graphs below (agent-authored, not templates)
+  src/workflow-builder.ts   builds all 5 workflow graphs below (agent-authored, not templates)
   src/keeperhub.ts           MCP client — session handshake, tools/call, response unwrapping
   src/dry-run.ts             create_workflow (disabled) + validate_workflow before any real run
   src/audit.ts               polls get_execution until terminal, extracts transaction hashes
-  src/index.ts                CLI entry: --workflow {basic|scheduled|guardian|advanced} [--execute]
-  workflows.json              registry of the 4 live, pre-created workflow IDs (below)
+  src/index.ts                CLI entry: --workflow {basic|scheduled|guardian|advanced|emergency} [--execute]
+  workflows.json              registry of the 5 live, pre-created workflow IDs (below)
 
 ui/                  Next.js 16 (App Router, Turbopack) app. Real Server Actions call the same
                       compiled Rust binary and the same KeeperHubClient the CLI uses — there is
@@ -75,9 +75,9 @@ ui/                  Next.js 16 (App Router, Turbopack) app. Real Server Actions
                               hand after any change there.
 ```
 
-## The 4 workflows
+## The 5 workflows
 
-All 4 are real, created via `create_workflow` against the live KeeperHub MCP server and
+All 5 are real, created via `create_workflow` against the live KeeperHub MCP server and
 confirmed `valid: true` via `validate_workflow(deepCheck: true)` — zero errors, zero warnings.
 
 | Kind | Workflow ID | Nodes | What it does |
@@ -86,6 +86,7 @@ confirmed `valid: true` via `validate_workflow(deepCheck: true)` — zero errors
 | `scheduled` | `6mfi90pptg2qtv5crmmf1` | 6 | Every 6h (`0 */6 * * *`), reads the live Aave V3 supply APY (`aave-v3/get-user-reserve-data.liquidityRate`, in ray units); if it's below 3%, withdraws and re-supplies 0.005 WETH, then logs the final balance either way. |
 | `guardian` | `awiys098yh7v2b9i5f8m1` | 5 | Hourly poll of the aWETH balance; if it drops below 0.004 (possible liquidation or an out-of-band withdrawal), runs a full Aave V3 health check and verifies the remaining gas balance. |
 | `advanced` | `ma6epf75fjdsonscq8roc` | 11 | Flagship. Pre-flight position check → balance gate → withdraw → receipt gate → supply → final verify, with dedicated `abort-log` and `alert-hold` off-ramps if either verification gate fails. |
+| `emergency` | `fbhmewqjmkiwlrwcsn1fi` | 5 | Panic button. Manual trigger only (no schedule) — withdraws the **entire** supplied position via Aave's `uint256`-max "withdraw all" sentinel, verifies it landed in the wallet, and confirms the position is fully closed. |
 
 Run any of them:
 
@@ -94,12 +95,14 @@ cd orchestrator
 node dist/index.js --workflow scheduled           # validates the pre-created workflow (dry run)
 node dist/index.js --workflow advanced --execute   # validates, then actually executes it
 node dist/index.js --workflow basic --plan ../plan.json --execute   # basic needs a plan
+node dist/index.js --workflow emergency --execute  # drains the entire position — use with intent
 ```
 
-`--workflow` defaults to `advanced`. `scheduled`/`guardian`/`advanced` reference the fixed IDs in
-`workflows.json` rather than creating a new workflow per run; `basic` is the only kind still built
-per-invocation from a `MigrationPlan` (via `--plan` or `--rust-bin`), since it's the one that
-actually moves a specific user's specific position rather than monitoring a fixed one.
+`--workflow` defaults to `advanced`. `scheduled`/`guardian`/`advanced`/`emergency` reference the
+fixed IDs in `workflows.json` rather than creating a new workflow per run; `basic` is the only
+kind still built per-invocation from a `MigrationPlan` (via `--plan` or `--rust-bin`), since it's
+the one that actually moves a specific user's specific position rather than monitoring or fully
+exiting a fixed one.
 
 ### `basic` workflow graph (the one that has actually executed on-chain)
 
@@ -133,6 +136,22 @@ trigger-1 (manual)
               --false-> alert-hold (web3/check-token-balance — funds held as WETH, flagged)
         --false-> abort-log (web3/check-token-balance — logged, nothing executed)
 ```
+
+### `emergency` workflow graph (the panic button)
+
+```
+trigger-1 (manual)
+  -> preflight       (aave-v3/get-user-reserve-data)
+    -> withdraw-all   (aave-v3/withdraw, amount = uint256 max)
+      -> verify-exit   (web3/check-token-balance)
+        -> confirm-closed (aave-v3/get-user-reserve-data)
+```
+
+No schedule, no threshold — this one is meant to be triggered by a person the moment something
+looks wrong, not by a cron. `amount` on `withdraw-all` is Aave's own `type(uint256).max`
+sentinel: the Pool contract itself special-cases that value as "withdraw the caller's entire
+balance," so this needs no dynamic balance lookup beforehand — one call closes the whole
+position regardless of its exact size.
 
 ## Verified execution
 
@@ -176,7 +195,7 @@ cd rust-core && cargo build --release
 # 2. Build the orchestrator
 cd ../orchestrator && npm install && npm run build
 
-# 3. Dry run any of the 4 workflows (no state mutated on-chain)
+# 3. Dry run any of the 5 workflows (no state mutated on-chain)
 node dist/index.js --workflow advanced
 
 # 4. Execute for real
@@ -254,7 +273,7 @@ plausible-sounding name — this table exists because several of the obvious nam
       configs.
 - [x] KeeperHub MCP client, dry-run flow, audit polling, all exercised against the live
       production MCP server.
-- [x] All 4 workflows created and `validate_workflow(deepCheck: true)`-passing on KeeperHub.
+- [x] All 5 workflows created and `validate_workflow(deepCheck: true)`-passing on KeeperHub.
 - [x] Real Sepolia execution of the `basic` workflow, independently verified on-chain (see
       [Verified execution](#verified-execution)).
 - [x] `ui/` Next.js app — real Server Actions, no mocked data.

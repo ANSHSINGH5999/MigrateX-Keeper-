@@ -422,3 +422,71 @@ export function buildAdvancedMigrationWorkflow(cfg: MonitorConfig): KeeperHubWor
     edges,
   };
 }
+
+/**
+ * uint256 max -- passed as `amount` to Pool.withdraw(), this is the
+ * standard Aave/Compound-style sentinel meaning "withdraw my entire
+ * balance," not a real numeric amount. This is a base-protocol
+ * convention (the Pool contract itself special-cases it), not a
+ * KeeperHub feature, so it needs no special support from aave-v3/withdraw
+ * beyond accepting an arbitrary string in that field, which it already does.
+ */
+const MAX_UINT256 = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+
+/**
+ * WORKFLOW 5 -- Emergency Exit (panic button).
+ * One manual trigger, no amount to configure: withdraws the ENTIRE
+ * supplied WETH position in a single call (via the uint256-max
+ * sentinel above) rather than a fixed 0.005 like every other workflow
+ * here, then confirms on-chain that the position is fully closed
+ * (currentATokenBalance back to 0). Meant to be triggered by hand when
+ * something looks wrong (a depeg, a suspicious rate change, anything
+ * that should not wait for the next scheduled check) -- it does not run
+ * on a timer.
+ */
+export function buildEmergencyExitWorkflow(cfg: MonitorConfig): KeeperHubWorkflow {
+  const { address: weth } = tokenInfo(cfg.network, "WETH");
+
+  const nodes: WorkflowNode[] = [
+    triggerNode(),
+    actionNode("preflight", 200, {
+      actionType: "aave-v3/get-user-reserve-data",
+      network: cfg.network,
+      asset: weth,
+      user: cfg.user,
+    }),
+    actionNode("withdraw-all", 400, {
+      actionType: "aave-v3/withdraw",
+      network: cfg.network,
+      asset: weth,
+      amount: MAX_UINT256,
+      to: cfg.user,
+    }),
+    actionNode("verify-exit", 600, {
+      actionType: "web3/check-token-balance",
+      network: cfg.network,
+      address: cfg.user,
+      tokenConfig: tokenConfig(cfg.network, "WETH"),
+    }),
+    actionNode("confirm-closed", 800, {
+      actionType: "aave-v3/get-user-reserve-data",
+      network: cfg.network,
+      asset: weth,
+      user: cfg.user,
+    }),
+  ];
+
+  const edges: WorkflowEdge[] = [
+    edge("trigger-1", "preflight"),
+    edge("preflight", "withdraw-all"),
+    edge("withdraw-all", "verify-exit"),
+    edge("verify-exit", "confirm-closed"),
+  ];
+
+  return {
+    name: "emergency-exit",
+    description: "Panic button: withdraw the entire supplied WETH position from Aave V3 in one call, verify it landed in the wallet, and confirm the position is fully closed.",
+    nodes,
+    edges,
+  };
+}

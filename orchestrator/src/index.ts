@@ -11,8 +11,8 @@ import { dryRun, explainDryRunFailure } from "./dry-run.js";
 import { pollUntilTerminal, summarizeAuditTrail, extractTransactionHashes } from "./audit.js";
 import type { MigrationPlan } from "./types.js";
 
-type WorkflowKind = "basic" | "scheduled" | "guardian" | "advanced";
-const WORKFLOW_KINDS: WorkflowKind[] = ["basic", "scheduled", "guardian", "advanced"];
+type WorkflowKind = "basic" | "scheduled" | "guardian" | "advanced" | "emergency";
+const WORKFLOW_KINDS: WorkflowKind[] = ["basic", "scheduled", "guardian", "advanced", "emergency"];
 
 interface Cli {
   planFile?: string;
